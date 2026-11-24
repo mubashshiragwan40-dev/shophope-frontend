@@ -1,11 +1,8 @@
 // lib/woocommerce.ts
-// Server-side only. Never import this from a client component.
-import OAuth from "oauth-1.0a";
-import crypto from "crypto";
+import "server-only";
+import { createHmac, randomBytes } from "node:crypto";
 
-const WC_URL: string | undefined = process.env.WOOCOMMERCE_URL;
-const WC_KEY: string | undefined = process.env.WC_CONSUMER_KEY;
-const WC_SECRET: string | undefined = process.env.WC_CONSUMER_SECRET;
+const TIMEOUT_MS = 10_000;
 
 export class WooError extends Error {
   status: number;
@@ -16,53 +13,89 @@ export class WooError extends Error {
   }
 }
 
-// OAuth 1.0a signs each request. This is what WooCommerce expects over plain HTTP.
-const oauth: OAuth | null =
-  WC_KEY && WC_SECRET
-    ? new OAuth({
-        consumer: { key: WC_KEY, secret: WC_SECRET },
-        signature_method: "HMAC-SHA256",
-        hash_function(baseString: string, key: string): string {
-          return crypto.createHmac("sha256", key).update(baseString).digest("base64");
-        },
-      })
-    : null;
+interface WooConfig {
+  base: URL;
+  key: string;
+  secret: string;
+}
 
-export async function wcFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-  if (!WC_URL || !oauth) {
-    throw new WooError("WooCommerce environment variables are missing", 500);
+function getConfig(): WooConfig {
+  const rawUrl: string | undefined = process.env.WOOCOMMERCE_URL;
+  const key: string | undefined = process.env.WC_CONSUMER_KEY;
+  const secret: string | undefined = process.env.WC_CONSUMER_SECRET;
+  if (!rawUrl || !key || !secret) throw new WooError("WooCommerce is not configured.", 500);
+
+  const base: URL = new URL(rawUrl);
+  if (process.env.NODE_ENV === "production" && base.protocol !== "https:") {
+    throw new WooError("WOOCOMMERCE_URL must use https in production.", 500);
   }
+  return { base, key, secret };
+}
 
-  const base: string = WC_URL.replace(/\/$/, "");
-  const cleanPath: string = path.replace(/^\//, "");
-  const url: string = `${base}/wp-json/wc/v3/${cleanPath}`;
+function rfc3986(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+/** OAuth 1.0a signing, needed by WooCommerce when the site is not on HTTPS (local development). */
+function signOAuth(method: string, fullUrl: string, key: string, secret: string): string {
+  const url: URL = new URL(fullUrl);
+  const params: Record<string, string> = {};
+  url.searchParams.forEach((v, k) => {
+    params[k] = v;
+  });
+  params.oauth_consumer_key = key;
+  params.oauth_nonce = randomBytes(16).toString("hex");
+  params.oauth_signature_method = "HMAC-SHA1";
+  params.oauth_timestamp = String(Math.floor(Date.now() / 1000));
+
+  const normalized: string = Object.keys(params)
+    .sort()
+    .map((k) => `${rfc3986(k)}=${rfc3986(params[k])}`)
+    .join("&");
+  const baseString: string = [method.toUpperCase(), rfc3986(`${url.origin}${url.pathname}`), rfc3986(normalized)].join("&");
+  params.oauth_signature = createHmac("sha1", `${rfc3986(secret)}&`).update(baseString).digest("base64");
+
+  const signed: URL = new URL(`${url.origin}${url.pathname}`);
+  for (const [k, v] of Object.entries(params)) signed.searchParams.set(k, v);
+  return signed.toString();
+}
+
+/** Calls the WooCommerce REST API (v3). `path` starts with "/", for example "/orders". */
+export async function wcFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const { base, key, secret } = getConfig();
   const method: string = (init.method ?? "GET").toUpperCase();
+  const root: string = base.toString().replace(/\/$/, "");
+  let url: string = `${root}/wp-json/wc/v3${path}`;
 
-  // Sign the method and full URL (including any ?query). The JSON body is not part of the signature.
-  const signed = oauth.toHeader(oauth.authorize({ url, method }));
-  const authHeader: { Authorization: string } = { Authorization: signed.Authorization };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  if (base.protocol === "https:") {
+    headers.Authorization = `Basic ${Buffer.from(`${key}:${secret}`).toString("base64")}`;
+  } else {
+    url = signOAuth(method, url, key, secret);
+  }
 
   const res: Response = await fetch(url, {
     ...init,
     method,
+    headers: { ...headers, ...(init.headers as Record<string, string> | undefined) },
     cache: "no-store",
-    signal: init.signal ?? AbortSignal.timeout(15_000),
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeader,
-      ...(init.headers ?? {}),
-    },
+    signal: init.signal ?? AbortSignal.timeout(TIMEOUT_MS),
   });
 
-  const data: unknown = await res.json().catch(() => null);
-
   if (!res.ok) {
-    const message: string =
-      typeof data === "object" && data !== null && "message" in data
-        ? String((data as { message: unknown }).message)
-        : `WooCommerce request failed (${res.status})`;
+    let message: string = `WooCommerce responded with ${res.status}`;
+    try {
+      const body: unknown = await res.json();
+      if (typeof body === "object" && body !== null && "message" in body) {
+        message = String((body as { message: unknown }).message);
+      }
+    } catch {
+      /* keep the default message */
+    }
     throw new WooError(message, res.status);
   }
-
-  return data as T;
+  return (await res.json()) as T;
 }

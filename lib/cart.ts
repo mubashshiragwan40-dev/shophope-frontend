@@ -14,6 +14,9 @@ export const CURRENCY: string = "KD";
 const MIN_QUANTITY: number = 1;
 const MAX_QUANTITY: number = 50;
 
+/** Same limit as MAX_LINES in app/api/orders/route.ts, so a cart the server would reject cannot be built. */
+const MAX_LINES: number = 50;
+
 /* ============================================================
    TYPES
    ============================================================ */
@@ -54,6 +57,7 @@ function isCartItem(value: unknown): value is CartItem {
     (typeof v.image === "string" || v.image === null) &&
     typeof v.price === "number" &&
     Number.isFinite(v.price) &&
+    v.price >= 0 &&
     typeof v.quantity === "number" &&
     Number.isInteger(v.quantity) &&
     v.quantity >= MIN_QUANTITY &&
@@ -73,7 +77,7 @@ export function readCart(): CartItem[] {
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isCartItem);
+    return parsed.filter(isCartItem).slice(0, MAX_LINES);
   } catch {
     return [];
   }
@@ -94,8 +98,14 @@ export function writeCart(items: CartItem[]): void {
    ACTIONS
    ============================================================ */
 
-/** Adds a product. If it is already in the cart, the quantity is increased. */
-export function addToCart(input: CartItemInput, quantity: number = 1): void {
+/**
+ * Adds a product. If it is already in the cart, the quantity is increased.
+ * Returns false when nothing was added (invalid product data, or the cart already has 50 different products).
+ */
+export function addToCart(input: CartItemInput, quantity: number = 1): boolean {
+  if (!isBrowser()) return false;
+  if (!input.id || !Number.isFinite(input.price) || input.price < 0) return false;
+
   const items: CartItem[] = readCart();
   const addQty: number = clampQuantity(quantity);
   const existing: CartItem | undefined = items.find((i) => i.id === input.id);
@@ -107,10 +117,12 @@ export function addToCart(input: CartItemInput, quantity: number = 1): void {
     existing.image = input.image;
     existing.slug = input.slug;
   } else {
-    items.push({ ...input, quantity: clampQuantity(addQty) });
+    if (items.length >= MAX_LINES) return false;
+    items.push({ ...input, quantity: addQty });
   }
 
   writeCart(items);
+  return true;
 }
 
 /** Sets an exact quantity (1 to 50). Values outside the range are clamped. */
@@ -136,9 +148,13 @@ export function getCartCount(items: CartItem[]): number {
   return items.reduce((sum, item) => sum + item.quantity, 0);
 }
 
+/** Sums in fils (thousandths of a dinar) so decimal errors cannot build up. */
 export function getCartSubtotal(items: CartItem[]): number {
-  const total: number = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  return Math.round(total * 1000) / 1000;
+  const fils: number = items.reduce(
+    (sum, item) => sum + Math.round(item.price * 1000) * item.quantity,
+    0
+  );
+  return fils / 1000;
 }
 
 /** Flat delivery fee (KD 1.000). Same value is used by the checkout and the server. */
@@ -153,5 +169,5 @@ export function getStandardShipping(_subtotal: number): number {
 
 /** Kuwait prices use 3 decimals (fils). Example: KD 1.000 */
 export function formatKD(amount: number): string {
-  return `${CURRENCY} ${amount.toFixed(3)}`;
+  return `${CURRENCY} ${(Number.isFinite(amount) ? amount : 0).toFixed(3)}`;
 }

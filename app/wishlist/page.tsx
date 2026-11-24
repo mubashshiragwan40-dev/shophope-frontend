@@ -3,24 +3,9 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { addToCart } from "@/lib/cart";
+import { addToCart, formatKD } from "@/lib/cart";
 import { WISHLIST_EVENT, readWishlist, writeWishlist, type WishlistItem } from "@/lib/wishlist";
 
-/* ============================================================
-   CONSTANTS
-   ============================================================ */
-const CURRENCY: string = "د.ك";
-
-/* ============================================================
-   HELPERS
-   ============================================================ */
-function formatPrice(amount: number): string {
-  return `${CURRENCY} ${amount.toFixed(2)}`;
-}
-
-/* ============================================================
-   ICONS
-   ============================================================ */
 function TrashIcon(): ReactNode {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -39,9 +24,6 @@ function EmptyHeartIcon(): ReactNode {
   );
 }
 
-/* ============================================================
-   WISHLIST ROW
-   ============================================================ */
 function WishlistRow({
   item,
   onAddToCart,
@@ -56,7 +38,6 @@ function WishlistRow({
 
   return (
     <div className="grid grid-cols-[72px_1fr] md:grid-cols-[minmax(0,2fr)_1fr_200px_40px] gap-4 md:gap-6 items-center py-6 border-b border-[#f1f5f9]">
-      {/* Product */}
       <div className="flex items-center gap-4 min-w-0">
         <Link
           href={`/product/${item.slug}`}
@@ -87,15 +68,12 @@ function WishlistRow({
           >
             {item.name}
           </Link>
-          {/* Mobile: price shown here */}
-          <p className="md:hidden mt-1 text-[14px] font-bold text-[#e91e63]">{formatPrice(item.price)}</p>
+          <p className="md:hidden mt-1 text-[14px] font-bold text-[#e91e63]">{formatKD(item.price)}</p>
         </div>
       </div>
 
-      {/* Price (desktop) */}
-      <div className="hidden md:block text-[15px] font-bold text-[#e91e63]">{formatPrice(item.price)}</div>
+      <div className="hidden md:block text-[15px] font-bold text-[#e91e63]">{formatKD(item.price)}</div>
 
-      {/* Actions */}
       <div className="col-span-2 md:col-span-1 flex items-center gap-3">
         <button
           type="button"
@@ -114,7 +92,6 @@ function WishlistRow({
         </button>
       </div>
 
-      {/* Remove (desktop) */}
       <div className="hidden md:flex justify-end">
         <button
           type="button"
@@ -129,20 +106,14 @@ function WishlistRow({
   );
 }
 
-/* ============================================================
-   PAGE
-   Header and footer come from app/layout.tsx (SiteHeader / SiteFooter).
-   ============================================================ */
 export default function WishlistPage(): ReactNode {
   const [items, setItems] = useState<WishlistItem[]>([]);
   const [loaded, setLoaded] = useState<boolean>(false);
   const [toast, setToast] = useState<string | null>(null);
 
-  /* Load wishlist and keep it in sync */
   useEffect(() => {
     const sync = (): void => setItems(readWishlist());
     sync();
-    // Hydrate from localStorage after mount to avoid an SSR mismatch.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoaded(true);
     window.addEventListener(WISHLIST_EVENT, sync);
@@ -153,14 +124,12 @@ export default function WishlistPage(): ReactNode {
     };
   }, []);
 
-  /* Toast auto-hide */
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), 2200);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  /* Adds to the shared cart. The header updates itself via CART_EVENT. */
   const handleAddToCart = (item: WishlistItem): void => {
     addToCart({ id: item.id, slug: item.slug, name: item.name, image: item.image, price: item.price }, 1);
     setToast(`Added to cart: ${item.name}`);
@@ -176,7 +145,6 @@ export default function WishlistPage(): ReactNode {
 
   return (
     <>
-      {/* Breadcrumb / title */}
       <section className="bg-[#f8f9fa] border-b border-[#f1f5f9]">
         <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 py-6">
           <nav aria-label="Breadcrumb" className="text-sm text-[#6c757d]">
@@ -190,7 +158,6 @@ export default function WishlistPage(): ReactNode {
 
       <section className="bg-white py-8 lg:py-12">
         <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0">
-          {/* Loading */}
           {!loaded && (
             <div className="space-y-4">
               <div className="h-24 bg-[#f8f9fa] animate-pulse" />
@@ -198,7 +165,6 @@ export default function WishlistPage(): ReactNode {
             </div>
           )}
 
-          {/* Empty */}
           {loaded && items.length === 0 && (
             <div className="max-w-xl mx-auto text-center py-16 border border-[#f1f5f9] bg-[#f8f9fa] px-6">
               <div className="flex justify-center mb-5">
@@ -218,7 +184,6 @@ export default function WishlistPage(): ReactNode {
             </div>
           )}
 
-          {/* List */}
           {loaded && items.length > 0 && (
             <div>
               <div className="hidden md:grid grid-cols-[minmax(0,2fr)_1fr_200px_40px] gap-6 pb-3 border-b-2 border-[#212529] text-[13px] font-semibold uppercase tracking-wide text-[#6c757d]">
@@ -254,7 +219,6 @@ export default function WishlistPage(): ReactNode {
         </div>
       </section>
 
-      {/* Toast */}
       <div
         aria-live="polite"
         className={`fixed bottom-6 right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-5 py-3 rounded-lg shadow-xl flex items-center gap-2 transition-all duration-300 ${

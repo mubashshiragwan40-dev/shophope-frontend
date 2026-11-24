@@ -3,13 +3,13 @@
 
 import { Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { WISHLIST_EVENT, readWishlist, toggleWishlist } from "@/lib/wishlist";
-import { addToCart } from "@/lib/cart";
+import { addToCart, formatKD, type CartItem } from "@/lib/cart";
+import { EXPRESS_BUY_NOW_KEY } from "@/app/product/[slug]/product-client";
+import { SHOP_OPEN_FILTERS_EVENT } from "@/components/site-header";
+import ProtectedProductImage from "@/components/protected-product-image";
 
-/* ============================================================
-   TYPES
-   ============================================================ */
 interface GraphQLCategory {
   databaseId: number;
   name: string;
@@ -22,10 +22,18 @@ interface GraphQLProduct {
   databaseId: number;
   name: string;
   slug: string;
-  price: string;
+  price: string | null;
   regularPrice: string | null;
+  stockStatus?: string | null;
   image: { sourceUrl: string } | null;
   productCategories: { nodes: GraphQLCategory[] } | null;
+  productTags?: { nodes: Array<{ name: string; slug: string }> } | null;
+  attributes?: {
+    nodes: Array<{
+      name: string;
+      options: string[];
+    }>;
+  } | null;
 }
 
 interface GraphQLResponse {
@@ -37,7 +45,6 @@ interface GraphQLResponse {
   errors?: Array<{ message: string }>;
 }
 
-/* Result of one fetch, tagged with the request key it belongs to */
 interface FetchResult {
   key: string;
   products: GraphQLProduct[];
@@ -47,6 +54,7 @@ interface FetchResult {
 interface CategoryNode {
   id: number;
   name: string;
+  slug: string;
   count: number;
   children: CategoryNode[];
 }
@@ -66,24 +74,35 @@ interface FilterState {
 
 type SortKey = "default" | "price-asc" | "price-desc" | "name-asc";
 
-/* ============================================================
-   CONSTANTS
-   ============================================================ */
 const API_URL: string =
   process.env.NEXT_PUBLIC_WORDPRESS_API_URL || "http://localhost/shophope/graphql";
 
-/* $term is optional. When it is null, WPGraphQL returns the full catalogue. */
 const PRODUCTS_QUERY: string = `
   query GetShopProducts($term: String) {
-    products(first: 48, where: { search: $term }) {
+    products(first: 100, where: { search: $term }) {
       nodes {
         id
         databaseId
         name
         slug
+        ... on InventoriedProduct {
+          stockStatus
+        }
         ... on SimpleProduct {
           price
           regularPrice
+        }
+        ... on VariableProduct {
+          price
+          regularPrice
+        }
+        ... on ProductWithAttributes {
+          attributes {
+            nodes {
+              name
+              options
+            }
+          }
         }
         image {
           sourceUrl
@@ -94,6 +113,12 @@ const PRODUCTS_QUERY: string = `
             name
             slug
             parentDatabaseId
+          }
+        }
+        productTags {
+          nodes {
+            name
+            slug
           }
         }
       }
@@ -111,8 +136,19 @@ const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
   { value: "price-desc", label: "Sort by price: high to low" },
 ];
 
-const COLORS: string[] = ["Blue", "Corn Yellow", "Dull Brown", "Ebony Clay", "Mushroom", "Red", "Tealish Blue"];
-const SIZES: string[] = ["Free size", "L", "XL"];
+const COLORS: string[] = [
+  "Blue",
+  "Corn Yellow",
+  "Dull Brown",
+  "Ebony Clay",
+  "Mushroom",
+  "Red",
+  "Tealish Blue",
+  "Black",
+  "White",
+  "Pink",
+];
+const SIZES: string[] = ["Free size", "S", "M", "L", "XL", "XXL"];
 
 const EMPTY_FILTERS: FilterState = {
   categoryId: null,
@@ -122,12 +158,8 @@ const EMPTY_FILTERS: FilterState = {
   sizes: [],
 };
 
-/* Stable empty list, so memos do not recompute on every render while loading */
 const NO_PRODUCTS: GraphQLProduct[] = [];
 
-/* ============================================================
-   HELPERS
-   ============================================================ */
 function htmlToText(html: string): string {
   if (typeof window === "undefined") return html.replace(/<[^>]*>/g, "");
   const doc = new DOMParser().parseFromString(html, "text/html");
@@ -149,7 +181,6 @@ function getDiscountPercent(price: string | null, regularPrice: string | null): 
   return Math.round(((regular - current) / regular) * 100);
 }
 
-/** Number of filters that are currently active (used for the badge on the Filter button). */
 function countActiveFilters(filters: FilterState): number {
   let count = 0;
   if (filters.categoryId !== null) count += 1;
@@ -160,12 +191,6 @@ function countActiveFilters(filters: FilterState): number {
   return count;
 }
 
-/**
- * Build a parent -> children category tree from the categories found on products.
- * A category counts as a "parent" when it has no parent (parentDatabaseId is null or 0)
- * or when its parent is not part of the loaded data.
- * Product counts include products of all child categories.
- */
 function buildCategoryTree(products: GraphQLProduct[]): CategoryNode[] {
   const byId = new Map<number, GraphQLCategory>();
   const productIdsByCategory = new Map<number, Set<string>>();
@@ -211,6 +236,7 @@ function buildCategoryTree(products: GraphQLProduct[]): CategoryNode[] {
   const toNode = (cat: GraphQLCategory): CategoryNode => ({
     id: cat.databaseId,
     name: cat.name,
+    slug: cat.slug,
     count: collectProductIds(cat.databaseId).size,
     children: (childrenByParent.get(cat.databaseId) ?? [])
       .map(toNode)
@@ -220,17 +246,25 @@ function buildCategoryTree(products: GraphQLProduct[]): CategoryNode[] {
   return roots.map(toNode).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Returns the id of the category and all its descendants. */
 function collectCategoryIds(node: CategoryNode): number[] {
   return [node.id, ...node.children.flatMap(collectCategoryIds)];
 }
 
-/* ============================================================
-   ICONS
-   ============================================================ */
-function HeartIcon(): ReactNode {
+function productMatchesAttribute(product: GraphQLProduct, selectedValues: string[]): boolean {
+  if (selectedValues.length === 0) return true;
+  const allOptions = (product.attributes?.nodes ?? [])
+    .flatMap((attr) => attr.options ?? [])
+    .map((opt) => opt.toLowerCase().trim());
+  const titleLower = product.name.toLowerCase();
+  return selectedValues.some((val) => {
+    const needle = val.toLowerCase().trim();
+    return allOptions.includes(needle) || titleLower.includes(needle);
+  });
+}
+
+function HeartIcon({ filled = false }: { filled?: boolean }): ReactNode {
   return (
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8Z" />
     </svg>
   );
@@ -238,7 +272,7 @@ function HeartIcon(): ReactNode {
 
 function FilterIcon(): ReactNode {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M3 5h18" />
       <path d="M6 12h12" />
       <path d="M10 19h4" />
@@ -254,47 +288,40 @@ function CloseIcon(): ReactNode {
   );
 }
 
-/* ============================================================
-   PAGE BANNER (breadcrumb + title)
-   ============================================================ */
-function PageBanner(): ReactNode {
+function UpArrowIcon(): ReactNode {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m18 15-6-6-6 6" />
+    </svg>
+  );
+}
+
+function PageBanner({ title }: { title: string }): ReactNode {
   return (
     <section className="bg-[#f8f9fa] border-b border-[#f1f5f9]">
-      <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 py-8 text-center">
-        <h1 className="text-3xl sm:text-4xl lg:text-[44px] font-bold tracking-tight text-[#212529]">Shop</h1>
-        <nav aria-label="Breadcrumb" className="mt-3 text-sm text-[#6c757d]">
+      <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 py-7 sm:py-8 text-center">
+        <h1 className="text-2xl sm:text-4xl lg:text-[42px] font-bold tracking-tight text-[#212529]">{title}</h1>
+        <nav aria-label="Breadcrumb" className="mt-2.5 text-sm text-[#6c757d]">
           <Link href="/" className="hover:text-[#e91e63] transition-colors">
             Home
           </Link>
           <span className="mx-2">/</span>
-          <span className="text-[#212529]">Shop</span>
+          <span className="text-[#212529]">{title}</span>
         </nav>
       </div>
     </section>
   );
 }
 
-/* ============================================================
-   FILTERS PANEL
-   Shared by the desktop sidebar and the mobile bottom sheet.
-   It is fully controlled: it reads `value` and reports changes via `onChange`.
-   ============================================================ */
 function SidebarSection({ title, children }: { title: string; children: ReactNode }): ReactNode {
   return (
     <div className="py-5 border-b border-[#f1f5f9]">
-      <h3 className="text-[15px] font-bold uppercase tracking-wide text-[#212529] mb-3">{title}</h3>
+      <h3 className="text-[14px] font-bold uppercase tracking-wide text-[#212529] mb-3">{title}</h3>
       {children}
     </div>
   );
 }
 
-/**
- * Parent categories with expandable children.
- * - Only parent categories are listed by default.
- * - Parents that have children get a +/- toggle to show the child list.
- * - A parent that contains the selected category stays expanded.
- * - "See more / See less" limits long parent lists.
- */
 function CategoryList({
   tree,
   totalProducts,
@@ -309,7 +336,6 @@ function CategoryList({
   const [expandedIds, setExpandedIds] = useState<number[]>([]);
   const [showAll, setShowAll] = useState<boolean>(false);
 
-  /* The parent of the selected child is always open (derived during render, no effect) */
   const selectedParentId: number | null =
     selectedId === null
       ? null
@@ -412,7 +438,6 @@ interface FiltersPanelProps {
   totalProducts: number;
   value: FilterState;
   onChange: (next: FilterState) => void;
-  /** Desktop shows a small "Filter" button under the price inputs. Mobile uses the sheet Apply button. */
   showPriceApplyButton: boolean;
   onApplyPrice?: () => void;
 }
@@ -445,7 +470,7 @@ function FiltersPanel({
             type="number"
             min={0}
             inputMode="decimal"
-            placeholder="Min"
+            placeholder="Min (KD)"
             aria-label="Minimum price"
             value={value.price.min}
             onChange={(e) => onChange({ ...value, price: { ...value.price, min: e.target.value } })}
@@ -455,7 +480,7 @@ function FiltersPanel({
             type="number"
             min={0}
             inputMode="decimal"
-            placeholder="Max"
+            placeholder="Max (KD)"
             aria-label="Maximum price"
             value={value.price.max}
             onChange={(e) => onChange({ ...value, price: { ...value.price, max: e.target.value } })}
@@ -528,13 +553,6 @@ function FiltersPanel({
   );
 }
 
-/* ============================================================
-   MOBILE FILTER SHEET (bottom sheet / drawer)
-   - Opens from the Filter button on mobile.
-   - Changes stay in a draft until the user taps Apply.
-   - Close with the X button, overlay tap, or the Esc key.
-   - Page scroll is locked while the sheet is open.
-   ============================================================ */
 interface MobileFilterSheetProps {
   open: boolean;
   onClose: () => void;
@@ -555,13 +573,11 @@ function MobileFilterSheet({
   const [draft, setDraft] = useState<FilterState>(applied);
   const [wasOpen, setWasOpen] = useState<boolean>(open);
 
-  /* Start from the applied filters each time the sheet opens (adjusted during render, no effect) */
   if (open !== wasOpen) {
     setWasOpen(open);
     if (open) setDraft(applied);
   }
 
-  /* Lock background scroll and close on Esc */
   useEffect(() => {
     if (!open) return;
 
@@ -586,13 +602,11 @@ function MobileFilterSheet({
       className={`lg:hidden fixed inset-0 z-[70] ${open ? "pointer-events-auto" : "pointer-events-none"}`}
       aria-hidden={!open}
     >
-      {/* Overlay */}
       <div
         onClick={onClose}
         className={`absolute inset-0 bg-black/50 transition-opacity duration-300 ${open ? "opacity-100" : "opacity-0"}`}
       />
 
-      {/* Sheet */}
       <div
         role="dialog"
         aria-modal="true"
@@ -601,7 +615,6 @@ function MobileFilterSheet({
           open ? "translate-y-0" : "translate-y-full"
         }`}
       >
-        {/* Header */}
         <div className="flex items-center justify-between px-5 h-14 border-b border-[#f1f5f9] shrink-0">
           <h2 className="text-[17px] font-bold text-[#212529]">
             Filters{draftCount > 0 ? ` (${draftCount})` : ""}
@@ -616,7 +629,6 @@ function MobileFilterSheet({
           </button>
         </div>
 
-        {/* Scrollable body */}
         <div className="flex-1 overflow-y-auto overscroll-contain px-5">
           <FiltersPanel
             categoryTree={categoryTree}
@@ -627,13 +639,12 @@ function MobileFilterSheet({
           />
         </div>
 
-        {/* Footer actions */}
         <div className="shrink-0 flex items-center gap-3 px-5 py-4 border-t border-[#f1f5f9] bg-white">
           <button
             type="button"
             onClick={() => setDraft(EMPTY_FILTERS)}
             disabled={draftCount === 0}
-            className="h-12 px-5 border border-[#dee2e6] rounded-md text-[14px] font-semibold uppercase text-[#212529] hover:border-[#e91e63] hover:text-[#e91e63] disabled:opacity-40 disabled:hover:border-[#dee2e6] disabled:hover:text-[#212529] transition-colors"
+            className="h-12 px-5 border border-[#dee2e6] rounded-md text-[14px] font-semibold uppercase text-[#212529] hover:border-[#e91e63] hover:text-[#e91e63] disabled:opacity-40 transition-colors"
           >
             Clear all
           </button>
@@ -654,114 +665,125 @@ function MobileFilterSheet({
 }
 
 /* ============================================================
-   PRODUCT CARD
-   Hover reveals Quick view and Add to wishlist.
+   SHOP PRODUCT CARD
    ============================================================ */
 interface ShopProductCardProps {
   product: GraphQLProduct;
   isWishlisted: boolean;
   onToggleWishlist: (product: GraphQLProduct) => void;
   onAdd: (product: GraphQLProduct) => void;
+  onBuyNow: (product: GraphQLProduct) => void;
 }
 
-function ShopProductCard({ product, isWishlisted, onToggleWishlist, onAdd }: ShopProductCardProps): ReactNode {
-  const [imgFailed, setImgFailed] = useState<boolean>(false);
-
+function ShopProductCard({
+  product,
+  isWishlisted,
+  onToggleWishlist,
+  onAdd,
+  onBuyNow,
+}: ShopProductCardProps): ReactNode {
   const categoryName: string =
-    product.productCategories?.nodes?.map((n) => n.name).join(" , ") || "Uncategorized";
+    product.productCategories?.nodes?.map((n) => n.name).join(", ") || "Uncategorized";
   const discount: number | null = getDiscountPercent(product.price, product.regularPrice);
-  const showImage: boolean = Boolean(product.image?.sourceUrl) && !imgFailed;
+  const priceNum: number | null = parseAmount(product.price);
+  const regularNum: number | null = parseAmount(product.regularPrice);
+  const isOutOfStock: boolean = product.stockStatus === "OUT_OF_STOCK";
   const productHref: string = `/product/${product.slug}`;
 
   return (
-    <article className="group relative flex flex-col h-full bg-white border border-[#f1f5f9] shadow-[0_2px_12px_rgba(33,37,41,0.06)] hover:shadow-[0_10px_30px_rgba(33,37,41,0.12)] transition-shadow duration-300">
+    <article className="group relative flex flex-col h-full bg-white rounded-xl border border-[#e9ecef] overflow-hidden shadow-[0_2px_10px_rgba(33,37,41,0.05)] hover:shadow-[0_10px_28px_rgba(33,37,41,0.12)] transition-shadow duration-300">
       {discount !== null && (
-        <span className="absolute top-3 left-3 z-10 bg-[#e91e63] text-white text-[13px] font-bold w-[52px] h-[52px] rounded-full flex items-center justify-center">
+        <span className="absolute top-2.5 left-2.5 z-10 bg-[#e91e63] text-white text-[11px] sm:text-[12px] font-bold px-2.5 py-1 rounded-full shadow">
           {`-${discount}%`}
         </span>
       )}
 
-      <div className="relative p-3 pb-0">
+      <div className="relative p-2.5 sm:p-3.5 pb-0">
         <Link
           href={productHref}
           aria-label={product.name}
-          className="block w-full aspect-square overflow-hidden bg-[#f8f9fa]"
+          className="block w-full aspect-square rounded-lg overflow-hidden bg-[#f8f9fa]"
         >
-          {showImage ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={product.image?.sourceUrl}
-              alt={product.name}
-              loading="lazy"
-              onError={() => setImgFailed(true)}
-              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center">
-              <svg viewBox="0 0 200 150" className="max-h-[160px] w-auto" role="img" aria-label="Product image placeholder">
-                <rect x="62" y="40" width="76" height="76" rx="14" fill="#ffffff" stroke="#212529" strokeWidth="5" />
-                <rect x="76" y="22" width="48" height="20" rx="6" fill="#e91e63" />
-                <circle cx="100" cy="80" r="16" fill="#fde4ec" />
-              </svg>
-            </div>
-          )}
+          <ProtectedProductImage
+            src={product.image?.sourceUrl}
+            alt={product.name}
+            imgClassName="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+          />
         </Link>
 
-        {/* Hover actions */}
-        <div className="absolute inset-x-3 bottom-3 flex gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity duration-300">
-          <Link
-            href={productHref}
-            className="flex-1 h-[40px] inline-flex items-center justify-center bg-white text-[#212529] hover:text-[#e91e63] text-[13px] font-semibold uppercase shadow"
-          >
-            Quick view
-          </Link>
-          <button
-            type="button"
-            onClick={() => onToggleWishlist(product)}
-            aria-pressed={isWishlisted}
-            aria-label={isWishlisted ? "Remove from wishlist" : "Add to wishlist"}
-            className={`w-[40px] h-[40px] inline-flex items-center justify-center shadow transition-colors ${
-              isWishlisted ? "bg-[#e91e63] text-white" : "bg-white text-[#212529] hover:text-[#e91e63]"
-            }`}
-          >
-            <HeartIcon />
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => onToggleWishlist(product)}
+          aria-pressed={isWishlisted}
+          aria-label={isWishlisted ? "Remove from wishlist" : "Add to wishlist"}
+          className={`absolute top-4 right-4 sm:top-5 sm:right-5 z-10 w-8 h-8 sm:w-9 sm:h-9 inline-flex items-center justify-center rounded-full border border-[#f1f5f9] shadow-sm transition-colors ${
+            isWishlisted ? "bg-[#e91e63] text-white border-[#e91e63]" : "bg-white text-[#212529] hover:text-[#e91e63]"
+          }`}
+        >
+          <HeartIcon filled={isWishlisted} />
+        </button>
       </div>
 
-      <div className="flex flex-col flex-1 p-4">
+      <div className="flex flex-col flex-1 p-3 sm:p-4 gap-1.5">
         <Link
           href={productHref}
           title={product.name}
-          className="block truncate text-[16px] font-normal text-[#212529] hover:text-[#e91e63] transition-colors"
+          className="line-clamp-2 min-h-[38px] sm:min-h-[42px] text-[13px] sm:text-[15px] font-semibold leading-snug text-[#212529] hover:text-[#e91e63] transition-colors"
         >
           {product.name}
         </Link>
 
-        <p className="mt-2 text-[13px] text-[#6c757d] truncate" title={categoryName}>
+        <p className="text-[11px] sm:text-[12px] text-[#6c757d] truncate" title={categoryName}>
           {categoryName}
         </p>
 
-        <div className="mt-auto pt-3 flex flex-col gap-3">
-          <div className="flex flex-wrap items-baseline gap-2">
-            {product.price ? (
-              <span className="text-[16px] font-bold text-[#e91e63]" dangerouslySetInnerHTML={{ __html: product.price }} />
+        {product.stockStatus && (
+          <p
+            className={`text-[11px] sm:text-[12px] font-semibold ${
+              isOutOfStock ? "text-[#dc3545]" : "text-[#198754]"
+            }`}
+          >
+            {isOutOfStock ? "Out of stock" : "✓ In stock"}
+          </p>
+        )}
+
+        <div className="mt-auto pt-2 flex flex-col gap-2">
+          <div className="flex flex-wrap items-baseline gap-1.5">
+            {priceNum !== null ? (
+              <span className="text-[14px] sm:text-[16px] font-bold text-[#e91e63]">{formatKD(priceNum)}</span>
             ) : (
-              <span className="text-sm font-semibold text-[#6c757d]">Select options</span>
+              <span className="text-xs font-semibold text-[#6c757d]">Select options</span>
             )}
-            {discount !== null && product.regularPrice && (
-              <span className="text-[14px] text-[#6c757d] line-through" dangerouslySetInnerHTML={{ __html: product.regularPrice }} />
+            {discount !== null && regularNum !== null && (
+              <span className="text-[11px] sm:text-[13px] text-[#6c757d] line-through">{formatKD(regularNum)}</span>
             )}
           </div>
 
-          <button
-            type="button"
-            onClick={() => onAdd(product)}
-            disabled={!product.price}
-            className="w-full h-[48px] bg-[#e91e63] hover:bg-[#c2185b] disabled:bg-[#f1f5f9] disabled:text-[#6c757d] active:scale-[0.98] text-white text-[14px] font-semibold uppercase rounded-md transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63] focus-visible:ring-offset-2"
-          >
-            ADD TO CART
-          </button>
+          {isOutOfStock || priceNum === null ? (
+            <Link
+              href={productHref}
+              className="h-10 sm:h-11 w-full inline-flex items-center justify-center rounded-md bg-[#212529] hover:bg-[#343a40] text-white text-[11px] sm:text-[12px] font-bold uppercase tracking-wide transition-colors"
+            >
+              View Product
+            </Link>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 sm:gap-2">
+              <button
+                type="button"
+                onClick={() => onAdd(product)}
+                className="h-9 sm:h-10 border border-[#e91e63] bg-white hover:bg-[#fff5f8] active:scale-[0.98] text-[#e91e63] text-[11px] sm:text-[12px] font-bold uppercase rounded-md transition-all"
+              >
+                Add Cart
+              </button>
+              <button
+                type="button"
+                onClick={() => onBuyNow(product)}
+                className="h-9 sm:h-10 bg-[#e91e63] hover:bg-[#c2185b] active:scale-[0.98] text-white text-[11px] sm:text-[12px] font-bold uppercase rounded-md transition-all"
+              >
+                Buy Now
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </article>
@@ -809,18 +831,17 @@ function Pagination({
 
 /* ============================================================
    SHOP CONTENT
-   Header and footer come from app/layout.tsx (SiteHeader / SiteFooter).
-   Reads ?search= from the URL and sends it to the WooCommerce search.
    ============================================================ */
 function ShopContent(): ReactNode {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const searchTerm: string = (searchParams.get("search") ?? "").trim();
+  const categorySlugParam: string = (searchParams.get("category") ?? "").trim().toLowerCase();
+  const tagSlugParam: string = (searchParams.get("tag") ?? "").trim().toLowerCase();
   const isSearching: boolean = searchTerm !== "";
 
   const [reloadKey, setReloadKey] = useState<number>(0);
 
-  /* Result of the latest request, tagged with the request key.
-     Loading and error are derived from it, so the fetch effect never sets state synchronously. */
   const requestKey: string = `${searchTerm}|${reloadKey}`;
   const [result, setResult] = useState<FetchResult | null>(null);
   const loading: boolean = result === null || result.key !== requestKey;
@@ -830,22 +851,16 @@ function ShopContent(): ReactNode {
   const [toast, setToast] = useState<string | null>(null);
   const [wishlist, setWishlist] = useState<string[]>([]);
 
-  /* Desktop sidebar visibility (Hide / Show sidebar) */
   const [showSidebar, setShowSidebar] = useState<boolean>(true);
-  /* Mobile filter sheet visibility */
   const [sheetOpen, setSheetOpen] = useState<boolean>(false);
+  const [showScrollTop, setShowScrollTop] = useState<boolean>(false);
 
   const [sort, setSort] = useState<SortKey>("default");
   const [page, setPage] = useState<number>(1);
 
-  /* Applied filters: the single source of truth used to filter products */
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
-
-  /* Desktop price inputs are typed first and applied with the small Filter button */
   const [desktopPriceDraft, setDesktopPriceDraft] = useState<PriceRange>({ min: "", max: "" });
 
-  /* Clear filters when a new search starts (adjusted during render, no effect),
-     so old filters do not hide the new results */
   const [prevSearchTerm, setPrevSearchTerm] = useState<string>(searchTerm);
   if (searchTerm !== prevSearchTerm) {
     setPrevSearchTerm(searchTerm);
@@ -853,7 +868,19 @@ function ShopContent(): ReactNode {
     setDesktopPriceDraft({ min: "", max: "" });
   }
 
-  /* Keep wishlist hearts in sync with localStorage */
+  useEffect(() => {
+    const onScroll = (): void => setShowScrollTop(window.scrollY > 500);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const openFromBottomBar = (): void => setSheetOpen(true);
+    window.addEventListener(SHOP_OPEN_FILTERS_EVENT, openFromBottomBar);
+    return () => window.removeEventListener(SHOP_OPEN_FILTERS_EVENT, openFromBottomBar);
+  }, []);
+
   useEffect(() => {
     const sync = (): void => setWishlist(readWishlist().map((i) => i.id));
     sync();
@@ -865,7 +892,6 @@ function ShopContent(): ReactNode {
     };
   }, []);
 
-  /* Fetch products. Refetches whenever the search term or the retry key changes. */
   useEffect(() => {
     const controller = new AbortController();
     const key: string = `${searchTerm}|${reloadKey}`;
@@ -911,17 +937,30 @@ function ShopContent(): ReactNode {
     return () => controller.abort();
   }, [reloadKey, searchTerm, isSearching]);
 
-  /* Toast auto-hide */
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), 2200);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  /* Parent -> children category tree built from the loaded products */
   const categoryTree: CategoryNode[] = useMemo(() => buildCategoryTree(products), [products]);
 
-  /* Ids that match the selected category (the category itself plus all its children) */
+  useEffect(() => {
+    if (!categorySlugParam || products.length === 0) return;
+    for (const product of products) {
+      const match = (product.productCategories?.nodes ?? []).find(
+        (c) => c.slug.toLowerCase() === categorySlugParam
+      );
+      if (match) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setFilters((prev) =>
+          prev.categoryId === match.databaseId ? prev : { ...prev, categoryId: match.databaseId }
+        );
+        break;
+      }
+    }
+  }, [categorySlugParam, products]);
+
   const selectedCategoryIds: number[] | null = useMemo(() => {
     if (filters.categoryId === null) return null;
 
@@ -938,7 +977,6 @@ function ShopContent(): ReactNode {
     return node ? collectCategoryIds(node) : [filters.categoryId];
   }, [filters.categoryId, categoryTree]);
 
-  /* Filter + sort */
   const filtered: GraphQLProduct[] = useMemo(() => {
     const min: number | null = filters.price.min === "" ? null : Number(filters.price.min);
     const max: number | null = filters.price.max === "" ? null : Number(filters.price.max);
@@ -953,7 +991,15 @@ function ShopContent(): ReactNode {
       ) {
         return false;
       }
+      if (
+        tagSlugParam &&
+        !(p.productTags?.nodes ?? []).some((t) => t.slug.toLowerCase() === tagSlugParam)
+      ) {
+        return false;
+      }
       if (filters.onSale && getDiscountPercent(p.price, p.regularPrice) === null) return false;
+      if (!productMatchesAttribute(p, filters.colors)) return false;
+      if (!productMatchesAttribute(p, filters.sizes)) return false;
       return true;
     });
 
@@ -966,10 +1012,9 @@ function ShopContent(): ReactNode {
     }
 
     return list;
-  }, [products, filters, selectedCategoryIds, sort]);
+  }, [products, filters, selectedCategoryIds, tagSlugParam, sort]);
 
-  /* Reset to page 1 when filters, sort or search change (adjusted during render, no effect) */
-  const resetKey: string = `${sort}|${searchTerm}|${JSON.stringify(filters)}|${filtered.length}`;
+  const resetKey: string = `${sort}|${searchTerm}|${tagSlugParam}|${JSON.stringify(filters)}|${filtered.length}`;
   const [prevResetKey, setPrevResetKey] = useState<string>(resetKey);
   if (resetKey !== prevResetKey) {
     setPrevResetKey(resetKey);
@@ -982,9 +1027,8 @@ function ShopContent(): ReactNode {
   const rangeStart: number = filtered.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1;
   const rangeEnd: number = Math.min(currentPage * PAGE_SIZE, filtered.length);
 
-  const activeFilterCount: number = countActiveFilters(filters);
+  const activeFilterCount: number = countActiveFilters(filters) + (tagSlugParam ? 1 : 0);
 
-  /* Desktop: every change applies immediately except price, which waits for the Filter button */
   const handleDesktopChange = (next: FilterState): void => {
     setDesktopPriceDraft(next.price);
     setFilters({ ...next, price: filters.price });
@@ -994,7 +1038,6 @@ function ShopContent(): ReactNode {
     setFilters((prev) => ({ ...prev, price: desktopPriceDraft }));
   };
 
-  /* Mobile sheet Apply: also keep the desktop price inputs in sync */
   const handleMobileApply = (next: FilterState): void => {
     setFilters(next);
     setDesktopPriceDraft(next.price);
@@ -1003,9 +1046,11 @@ function ShopContent(): ReactNode {
   const handleClearAll = (): void => {
     setFilters(EMPTY_FILTERS);
     setDesktopPriceDraft({ min: "", max: "" });
+    if (categorySlugParam || tagSlugParam) {
+      router.push("/shop");
+    }
   };
 
-  /* Save the product to the shared cart (lib/cart.ts). The header updates itself via CART_EVENT. */
   const handleAddToCart = (product: GraphQLProduct): void => {
     addToCart({
       id: String(product.databaseId),
@@ -1017,7 +1062,31 @@ function ShopContent(): ReactNode {
     setToast(`Added: ${product.name}`);
   };
 
-  /* Save the full product to localStorage so the wishlist page can show it */
+  const handleBuyNow = (product: GraphQLProduct): void => {
+    const price = parseAmount(product.price);
+    if (price === null) return;
+    const expressItem: CartItem = {
+      id: String(product.databaseId),
+      slug: product.slug,
+      name: product.name,
+      image: product.image?.sourceUrl ?? null,
+      price,
+      quantity: 1,
+    };
+    try {
+      sessionStorage.setItem(EXPRESS_BUY_NOW_KEY, JSON.stringify(expressItem));
+    } catch {
+      addToCart({
+        id: expressItem.id,
+        slug: expressItem.slug,
+        name: expressItem.name,
+        image: expressItem.image,
+        price: expressItem.price,
+      });
+    }
+    router.push("/checkout?mode=buy_now");
+  };
+
   const handleToggleWishlist = (product: GraphQLProduct): void => {
     const added: boolean = toggleWishlist({
       id: product.id,
@@ -1029,14 +1098,17 @@ function ShopContent(): ReactNode {
     setToast(added ? "Added to wishlist" : "Removed from wishlist");
   };
 
+  const bannerTitle = categorySlugParam
+    ? categorySlugParam.replace(/-/g, " ").replace(/\b\w/g, (l) => l.toUpperCase())
+    : "Shop";
+
   return (
     <>
-      <PageBanner />
+      <PageBanner title={bannerTitle} />
 
-      <section className="bg-white py-8">
+      <section className="bg-white py-6 sm:py-8">
         <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0">
           <div className={`grid gap-8 ${showSidebar ? "lg:grid-cols-[260px_1fr]" : "grid-cols-1"}`}>
-            {/* Desktop sidebar: hidden on mobile and tablet */}
             {showSidebar && (
               <aside className="hidden lg:block" aria-label="Product filters">
                 <FiltersPanel
@@ -1051,9 +1123,8 @@ function ShopContent(): ReactNode {
             )}
 
             <div>
-              {/* Search summary: shown only when the URL has a search term */}
               {isSearching && (
-                <div className="mb-5 flex flex-wrap items-center justify-between gap-3 bg-[#f8f9fa] border border-[#f1f5f9] px-4 py-3">
+                <div className="mb-5 flex flex-wrap items-center justify-between gap-3 bg-[#f8f9fa] border border-[#f1f5f9] px-4 py-3 rounded-lg">
                   <p className="text-sm text-[#495057]">
                     Search results for{" "}
                     <span className="font-semibold text-[#212529]">&quot;{searchTerm}&quot;</span>
@@ -1067,26 +1138,23 @@ function ShopContent(): ReactNode {
                 </div>
               )}
 
-              {/* Toolbar */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 mb-6 border-b border-[#f1f5f9]">
-                <div className="flex flex-wrap items-center gap-3 sm:gap-4">
-                  {/* Mobile / tablet: opens the filter sheet */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 mb-6 border-b border-[#f1f5f9]">
+                <div className="flex flex-wrap items-center gap-2.5 sm:gap-4">
                   <button
                     type="button"
                     onClick={() => setSheetOpen(true)}
                     aria-haspopup="dialog"
-                    className="lg:hidden h-10 px-4 inline-flex items-center gap-2 border border-[#dee2e6] text-sm font-semibold uppercase rounded-md hover:border-[#e91e63] hover:text-[#e91e63] transition-colors"
+                    className="lg:hidden h-9 px-3.5 inline-flex items-center gap-2 border border-[#dee2e6] text-xs font-semibold uppercase rounded-md hover:border-[#e91e63] hover:text-[#e91e63] transition-colors"
                   >
                     <FilterIcon />
-                    Filter
+                    Filters
                     {activeFilterCount > 0 && (
-                      <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#e91e63] text-white text-[11px] font-bold flex items-center justify-center">
+                      <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-[#e91e63] text-white text-[10px] font-bold flex items-center justify-center">
                         {activeFilterCount}
                       </span>
                     )}
                   </button>
 
-                  {/* Desktop: hide / show the sidebar */}
                   <button
                     type="button"
                     onClick={() => setShowSidebar((prev) => !prev)}
@@ -1095,7 +1163,7 @@ function ShopContent(): ReactNode {
                     {showSidebar ? "Hide sidebar" : "Show sidebar"}
                   </button>
 
-                  <p className="text-sm text-[#6c757d]">
+                  <p className="text-xs sm:text-sm text-[#6c757d]">
                     {loading ? "Loading products..." : `Showing ${rangeStart}–${rangeEnd} of ${filtered.length} results`}
                   </p>
                 </div>
@@ -1104,7 +1172,7 @@ function ShopContent(): ReactNode {
                   aria-label="Shop order"
                   value={sort}
                   onChange={(e) => setSort(e.target.value as SortKey)}
-                  className="h-10 px-3 border border-[#dee2e6] rounded-md text-sm bg-white focus:outline-none focus:border-[#e91e63]"
+                  className="h-10 px-3 border border-[#dee2e6] rounded-md text-xs sm:text-sm bg-white focus:outline-none focus:border-[#e91e63]"
                 >
                   {SORT_OPTIONS.map((opt) => (
                     <option key={opt.value} value={opt.value}>
@@ -1114,9 +1182,8 @@ function ShopContent(): ReactNode {
                 </select>
               </div>
 
-              {/* Active filters hint (mobile): quick way to clear without opening the sheet */}
               {activeFilterCount > 0 && (
-                <div className="lg:hidden -mt-2 mb-5 flex items-center justify-between text-sm">
+                <div className="-mt-2 mb-5 flex items-center justify-between text-xs sm:text-sm">
                   <span className="text-[#6c757d]">{`${activeFilterCount} filter${activeFilterCount > 1 ? "s" : ""} applied`}</span>
                   <button
                     type="button"
@@ -1128,18 +1195,16 @@ function ShopContent(): ReactNode {
                 </div>
               )}
 
-              {/* Loading */}
               {loading && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-6" aria-busy="true">
+                <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-6" aria-busy="true">
                   {Array.from({ length: 6 }).map((_, i) => (
-                    <div key={i} className="h-[460px] bg-[#f8f9fa] border border-[#f1f5f9] animate-pulse" />
+                    <div key={i} className="h-[360px] sm:h-[440px] rounded-xl bg-[#f8f9fa] border border-[#f1f5f9] animate-pulse" />
                   ))}
                 </div>
               )}
 
-              {/* Error */}
               {!loading && error && (
-                <div role="alert" className="max-w-xl mx-auto text-center border border-[#f1f5f9] p-8 bg-[#f8f9fa]">
+                <div role="alert" className="max-w-xl mx-auto text-center border border-[#f1f5f9] p-8 bg-[#f8f9fa] rounded-xl">
                   <p className="font-bold text-[#212529]">We couldn&apos;t load products.</p>
                   <p className="mt-1 text-sm text-[#6c757d]">{error}</p>
                   <button
@@ -1152,42 +1217,21 @@ function ShopContent(): ReactNode {
                 </div>
               )}
 
-              {/* Empty: no search matches, or filters exclude everything */}
               {!loading && !error && filtered.length === 0 && (
-                <div className="text-center py-12">
-                  {isSearching && products.length === 0 ? (
-                    <>
-                      <p className="text-[#212529] font-semibold">
-                        No products match <span className="text-[#e91e63]">&quot;{searchTerm}&quot;</span>.
-                      </p>
-                      <p className="mt-2 text-sm text-[#6c757d]">Try a different keyword or browse all products.</p>
-                      <Link
-                        href="/shop"
-                        className="mt-5 inline-flex h-11 items-center px-6 bg-[#e91e63] hover:bg-[#c2185b] text-white text-[13px] font-semibold uppercase rounded-md transition-colors"
-                      >
-                        Browse all products
-                      </Link>
-                    </>
-                  ) : (
-                    <>
-                      <p className="text-[#6c757d]">No products match these filters.</p>
-                      {activeFilterCount > 0 && (
-                        <button
-                          type="button"
-                          onClick={handleClearAll}
-                          className="mt-4 h-11 px-6 bg-[#e91e63] hover:bg-[#c2185b] text-white text-[13px] font-semibold uppercase rounded-md transition-colors"
-                        >
-                          Clear all filters
-                        </button>
-                      )}
-                    </>
-                  )}
+                <div className="text-center py-12 bg-[#f8f9fa] border border-[#f1f5f9] rounded-xl">
+                  <p className="text-[#6c757d]">No products match these filters.</p>
+                  <button
+                    type="button"
+                    onClick={handleClearAll}
+                    className="mt-4 h-11 px-6 bg-[#e91e63] hover:bg-[#c2185b] text-white text-[13px] font-semibold uppercase rounded-md transition-colors"
+                  >
+                    Show all products
+                  </button>
                 </div>
               )}
 
-              {/* Grid */}
               {!loading && !error && pageItems.length > 0 && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-6">
+                <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-6">
                   {pageItems.map((product) => (
                     <ShopProductCard
                       key={product.id}
@@ -1195,6 +1239,7 @@ function ShopContent(): ReactNode {
                       isWishlisted={wishlist.includes(product.id)}
                       onToggleWishlist={handleToggleWishlist}
                       onAdd={handleAddToCart}
+                      onBuyNow={handleBuyNow}
                     />
                   ))}
                 </div>
@@ -1206,7 +1251,6 @@ function ShopContent(): ReactNode {
         </div>
       </section>
 
-      {/* Mobile filter bottom sheet */}
       <MobileFilterSheet
         open={sheetOpen}
         onClose={() => setSheetOpen(false)}
@@ -1216,10 +1260,20 @@ function ShopContent(): ReactNode {
         onApply={handleMobileApply}
       />
 
-      {/* Toast */}
+      {showScrollTop && (
+        <button
+          type="button"
+          onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+          aria-label="Scroll to top"
+          className="fixed bottom-20 md:bottom-6 right-4 sm:right-6 z-40 w-10 h-10 rounded-full bg-white border border-[#dee2e6] text-[#212529] hover:bg-[#e91e63] hover:text-white hover:border-[#e91e63] shadow-md inline-flex items-center justify-center transition-colors"
+        >
+          <UpArrowIcon />
+        </button>
+      )}
+
       <div
         aria-live="polite"
-        className={`fixed bottom-6 right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-5 py-3 rounded-lg shadow-xl flex items-center gap-2 transition-all duration-300 ${
+        className={`fixed bottom-20 md:bottom-6 left-4 sm:left-auto sm:right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-5 py-3 rounded-lg shadow-xl flex items-center gap-2 transition-all duration-300 ${
           toast ? "translate-y-0 opacity-100" : "translate-y-5 opacity-0 pointer-events-none"
         }`}
       >
@@ -1230,10 +1284,6 @@ function ShopContent(): ReactNode {
   );
 }
 
-/* ============================================================
-   PAGE
-   useSearchParams needs a Suspense boundary in the App Router.
-   ============================================================ */
 export default function ShopPage(): ReactNode {
   return (
     <Suspense fallback={null}>

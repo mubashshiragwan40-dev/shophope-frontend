@@ -1,8 +1,9 @@
 // app/api/orders/route.ts
 import { NextResponse } from "next/server";
 import { wcFetch, WooError } from "@/lib/woocommerce";
-import { validateCheckoutCustomer } from "@/lib/checkout-validation";
+import { normalizeKuwaitPhone, validateCheckoutCustomer } from "@/lib/checkout-validation";
 import { graphqlRequest, ExpiredTokenError, GraphQLError } from "@/lib/graphql";
+import { sendWhatsAppOrderConfirmation } from "@/lib/whatsapp";
 import {
   DELIVERY_FEE_KD,
   type CreateOrderResponse,
@@ -11,7 +12,7 @@ import {
 } from "@/lib/orders";
 
 /* ============================================================
-   TYPES (WooCommerce REST responses, only the fields we use)
+   TYPES
    ============================================================ */
 interface WcProduct {
   id: number;
@@ -62,8 +63,6 @@ const VIEWER_ID_QUERY: string = /* GraphQL */ `
 /* ============================================================
    HELPERS
    ============================================================ */
-
-/** Plain error that carries the HTTP status and optional field errors back to the client. */
 class RequestError extends Error {
   status: number;
   fields?: Record<string, string>;
@@ -83,10 +82,6 @@ function errorResponse(
   return NextResponse.json(fields ? { error: message, fields } : { error: message }, { status });
 }
 
-/**
- * Reads "Authorization: Bearer <token>" and returns the WordPress user ID.
- * Returns null for guests (no header). Throws 401 for an invalid or expired token.
- */
 async function getCustomerIdFromRequest(request: Request): Promise<number | null> {
   const header: string = (request.headers.get("Authorization") ?? "").trim();
   if (header === "") return null;
@@ -112,10 +107,6 @@ async function getCustomerIdFromRequest(request: Request): Promise<number | null
   throw new RequestError(SESSION_EXPIRED_MESSAGE, 401);
 }
 
-/**
- * Cart IDs can be a WPGraphQL global ID (base64 of "post:42" / "product:42")
- * or a plain database ID. Both resolve to a positive integer.
- */
 function toProductId(raw: unknown): number | null {
   if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) return raw;
   if (typeof raw !== "string") return null;
@@ -132,7 +123,6 @@ function toProductId(raw: unknown): number | null {
   }
 }
 
-/** Reads and checks the items list. Merges duplicate products and enforces quantity limits. */
 function parseItems(raw: unknown): OrderLine[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new RequestError("Your cart is empty.", 400);
@@ -171,10 +161,6 @@ function parseItems(raw: unknown): OrderLine[] {
   return Array.from(merged, ([productId, quantity]) => ({ productId, quantity }));
 }
 
-/**
- * Loads each product from WooCommerce and checks it can be bought.
- * Prices always come from the store, never from the browser.
- */
 async function loadProducts(lines: OrderLine[]): Promise<Map<number, WcProduct>> {
   const ids: string = lines.map((l) => l.productId).join(",");
   const products: WcProduct[] = await wcFetch<WcProduct[]>(
@@ -193,7 +179,7 @@ async function loadProducts(lines: OrderLine[]): Promise<Map<number, WcProduct>>
     }
     if (product.type !== "simple") {
       throw new RequestError(
-        `"${product.name}" needs options selected and cannot be ordered from the cart.`,
+        `"${product.name}" needs options selected and cannot be ordered directly.`,
         409
       );
     }
@@ -216,13 +202,11 @@ async function loadProducts(lines: OrderLine[]): Promise<Map<number, WcProduct>>
   return byId;
 }
 
-/** Same key the client sends. Prevents a double click or retry from creating two orders. */
 function readIdempotencyKey(request: Request): string | null {
   const key: string = (request.headers.get("Idempotency-Key") ?? "").trim();
   return /^[A-Za-z0-9_-]{8,100}$/.test(key) ? key : null;
 }
 
-/** Looks for an order already created with this key (the retry case). */
 async function findExistingOrder(key: string): Promise<WcCreatedOrder | null> {
   const found: WcCreatedOrder[] = await wcFetch<WcCreatedOrder[]>(
     `/orders?search=${encodeURIComponent(key)}&per_page=5`
@@ -232,13 +216,9 @@ async function findExistingOrder(key: string): Promise<WcCreatedOrder | null> {
 
 /* ============================================================
    POST /api/orders
-   Body: { customer, items: [{ id, quantity }], delivery, payment }
-   Headers: Authorization (optional, logged-in users), Idempotency-Key (optional)
-   Creates a cash-on-delivery order. Totals come from the server only.
    ============================================================ */
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    /* 1. Parse the body (size-limited, never throws) */
     const rawText: string = await request.text().catch(() => "");
     if (rawText.length === 0 || rawText.length > MAX_BODY_BYTES) {
       return errorResponse("Invalid request.", 400);
@@ -258,7 +238,6 @@ export async function POST(request: Request): Promise<NextResponse> {
       payment?: unknown;
     };
 
-    /* 2. Validate delivery and payment */
     const delivery: DeliveryMethod = (b.delivery ?? "standard") as DeliveryMethod;
     const payment: PaymentMethod = (b.payment ?? "cod") as PaymentMethod;
 
@@ -269,7 +248,6 @@ export async function POST(request: Request): Promise<NextResponse> {
       return errorResponse("This payment method is not available.", 400);
     }
 
-    /* 3. Validate customer (shared with the client, so both sides agree) */
     const { data: customer, errors } = validateCheckoutCustomer(b.customer);
     if (!customer) {
       return errorResponse(
@@ -279,28 +257,31 @@ export async function POST(request: Request): Promise<NextResponse> {
       );
     }
 
-    /* 4. Identify the logged-in user (null for guests). Invalid token returns 401. */
     const customerId: number | null = await getCustomerIdFromRequest(request);
-
-    /* 5. Validate items and check them against the store */
     const lines: OrderLine[] = parseItems(b.items);
 
-    /* 6. Retry protection */
     const idempotencyKey: string | null = readIdempotencyKey(request);
     if (idempotencyKey) {
       const existing: WcCreatedOrder | null = await findExistingOrder(idempotencyKey);
       if (existing) {
-        const reply = {
+        const reply: CreateOrderResponse = {
+          orderId: existing.id,
           orderNumber: existing.number,
           email: customer.email,
-        } as CreateOrderResponse;
+          phone: customer.phone,
+        };
         return NextResponse.json(reply, { status: 200 });
       }
     }
 
     await loadProducts(lines);
 
-    /* 7. Build and create the WooCommerce order */
+    const eightDigits: string = normalizeKuwaitPhone(customer.phone);
+    const billingEmail: string =
+      customer.email && customer.email.trim().length > 0
+        ? customer.email.trim()
+        : `wa-${eightDigits}@noemail.shophope.online`;
+
     const address = {
       first_name: customer.firstName,
       last_name: customer.lastName,
@@ -317,15 +298,21 @@ export async function POST(request: Request): Promise<NextResponse> {
       country: KUWAIT_COUNTRY,
     };
 
+    const metaData = [
+      { key: "_shophope_whatsapp_number", value: customer.phone },
+      { key: "_shophope_email_optional", value: customer.email ? "provided" : "omitted" },
+      ...(idempotencyKey ? [{ key: "_idempotency_key", value: idempotencyKey }] : []),
+    ];
+
     const created: WcCreatedOrder = await wcFetch<WcCreatedOrder>("/orders", {
       method: "POST",
       body: JSON.stringify({
-        customer_id: customerId ?? 0, // 0 = guest, otherwise the order appears in My Account
+        customer_id: customerId ?? 0,
         status: "processing",
         set_paid: false,
         payment_method: "cod",
         payment_method_title: "Cash on delivery",
-        billing: { ...address, email: customer.email, phone: customer.phone },
+        billing: { ...address, email: billingEmail, phone: customer.phone },
         shipping: { ...address, phone: customer.phone },
         customer_note: customer.deliveryNote ?? "",
         line_items: lines.map((l) => ({ product_id: l.productId, quantity: l.quantity })),
@@ -336,23 +323,31 @@ export async function POST(request: Request): Promise<NextResponse> {
             total: DELIVERY_FEE_KD.toFixed(3),
           },
         ],
-        meta_data: idempotencyKey ? [{ key: "_idempotency_key", value: idempotencyKey }] : [],
+        meta_data: metaData,
       }),
     });
 
-    const reply = {
+    await sendWhatsAppOrderConfirmation({
+      phoneWithCode: customer.phone,
+      customerName: customer.firstName,
+      orderNumber: created.number,
+      totalKd: created.total,
+      area: customer.area,
+    });
+
+    const reply: CreateOrderResponse = {
+      orderId: created.id,
       orderNumber: created.number,
       email: customer.email,
-    } as CreateOrderResponse;
+      phone: customer.phone,
+    };
 
     return NextResponse.json(reply, { status: 201 });
   } catch (err: unknown) {
-    /* Known problems with the request, the session, or the cart */
     if (err instanceof RequestError) {
       return errorResponse(err.message, err.status, err.fields);
     }
 
-    /* WooCommerce rejected or failed. Details stay in the server log only. */
     if (err instanceof WooError) {
       if (err.status === 401 || err.status === 403) {
         console.error("[orders] WooCommerce auth rejected. Check WC_CONSUMER_KEY/SECRET (Read/Write).");
@@ -373,11 +368,6 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 }
 
-/* ============================================================
-   Other methods
-   Order lookup lives in /api/orders/track (needs order number + contact).
-   Listing or editing orders here would expose customer data, so it is blocked.
-   ============================================================ */
 const METHOD_NOT_ALLOWED: NextResponse = NextResponse.json(
   { error: "Method not allowed." },
   { status: 405, headers: { Allow: "POST" } }

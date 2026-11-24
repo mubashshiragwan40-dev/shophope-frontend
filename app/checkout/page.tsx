@@ -1,8 +1,9 @@
 // app/checkout/page.tsx
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   CART_EVENT,
   type CartItem,
@@ -16,6 +17,7 @@ import {
 } from "@/lib/cart";
 import {
   DELIVERY_FEE_KD,
+  KUWAIT_AREAS_BY_GOVERNORATE,
   KUWAIT_GOVERNORATES,
   type CreateOrderRequest,
   type CreateOrderResponse,
@@ -24,6 +26,7 @@ import {
 } from "@/lib/orders";
 import { EMAIL_RE, normalizeKuwaitPhone } from "@/lib/checkout-validation";
 import { getStoredToken } from "@/lib/auth";
+import { EXPRESS_BUY_NOW_KEY } from "@/app/product/[slug]/product-client";
 import CheckoutSteps from "@/components/checkout-steps";
 
 /* ============================================================
@@ -53,7 +56,6 @@ interface PaymentOption {
   description: string;
 }
 
-/** Error that keeps the field-level messages sent by the server. */
 class OrderError extends Error {
   fields?: FormErrors;
   constructor(message: string, fields?: FormErrors) {
@@ -64,10 +66,11 @@ class OrderError extends Error {
 }
 
 /* ============================================================
-   CONSTANTS (Kuwait specific)
+   CONSTANTS
    ============================================================ */
+const SAVED_KW_ADDRESS_PREFIX = "shophope-kw-wa-addr-";
+const OTHER_AREA_VALUE = "__OTHER__";
 
-/* Only COD until a payment gateway (K-Net / card) is connected on the server. */
 const PAYMENT_OPTIONS: PaymentOption[] = [
   {
     value: "cod",
@@ -97,14 +100,15 @@ const KUWAIT_MOBILE_RE: RegExp = /^[569]\d{7}$/;
 /* ============================================================
    HELPERS
    ============================================================ */
-
 function isKuwaitMobile(value: string): boolean {
   return KUWAIT_MOBILE_RE.test(normalizeKuwaitPhone(value.trim()));
 }
 
 function validate(form: CheckoutForm): FormErrors {
   const errors: FormErrors = {};
-  if (!EMAIL_RE.test(form.email.trim())) errors.email = "Enter a valid email address.";
+  if (form.email.trim().length > 0 && !EMAIL_RE.test(form.email.trim())) {
+    errors.email = "Enter a valid email address or leave it blank.";
+  }
   if (!form.firstName.trim()) errors.firstName = "First name is required.";
   if (!form.lastName.trim()) errors.lastName = "Last name is required.";
   if (!isKuwaitMobile(form.phone)) {
@@ -118,21 +122,22 @@ function validate(form: CheckoutForm): FormErrors {
   return errors;
 }
 
-/**
- * Sends the order to the server route. The server re-reads every product price,
- * sets the delivery fee, and creates the WooCommerce order.
- * Browser totals are never trusted.
- *
- * When the customer is logged in, the auth token is sent so the server links the
- * order to their account (it then appears in My Account > Orders).
- * Without a token the order is saved as a guest order.
- */
-async function placeOrder(form: CheckoutForm, items: CartItem[]): Promise<CreateOrderResponse> {
+function newIdempotencyKey(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
+    b.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+async function placeOrder(
+  form: CheckoutForm,
+  items: CartItem[],
+  idempotencyKey: string
+): Promise<CreateOrderResponse> {
   const delivery: DeliveryMethod = "standard";
 
   const body: CreateOrderRequest = {
     customer: {
-      email: form.email.trim(),
+      email: form.email.trim() || undefined,
       firstName: form.firstName.trim(),
       lastName: form.lastName.trim(),
       phone: form.phone.trim(),
@@ -156,6 +161,7 @@ async function placeOrder(form: CheckoutForm, items: CartItem[]): Promise<Create
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "Idempotency-Key": idempotencyKey,
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(body),
@@ -208,6 +214,15 @@ function inputClass(hasError: boolean): string {
     hasError ? "border-[#dc3545]" : "border-[#dee2e6]"
   }`;
 }
+
+function selectClass(hasError: boolean): string {
+  return `${inputClass(hasError)} appearance-none bg-no-repeat bg-[length:16px] bg-[right_16px_center] pr-10`;
+}
+
+const SELECT_CHEVRON_STYLE = {
+  backgroundImage:
+    "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='%23495057' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\")",
+};
 
 function FieldLabel({
   htmlFor,
@@ -310,13 +325,10 @@ function GovernorateField({
         aria-invalid={Boolean(error)}
         aria-describedby={error ? errorId : undefined}
         onChange={(e) => onChange(e.target.value)}
-        className={`${inputClass(Boolean(error))} appearance-none bg-no-repeat bg-[length:16px] bg-[right_16px_center] pr-10`}
-        style={{
-          backgroundImage:
-            "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='%23495057' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\")",
-        }}
+        className={selectClass(Boolean(error))}
+        style={SELECT_CHEVRON_STYLE}
       >
-        <option value="">Select</option>
+        <option value="">Select Governorate</option>
         {KUWAIT_GOVERNORATES.map((g) => (
           <option key={g} value={g}>
             {g}
@@ -328,23 +340,105 @@ function GovernorateField({
   );
 }
 
+function AreaSelectField({
+  governorate,
+  value,
+  customAreaMode,
+  error,
+  onSelectChange,
+  onCustomAreaChange,
+}: {
+  governorate: string;
+  value: string;
+  customAreaMode: boolean;
+  error?: string;
+  onSelectChange: (selectedValue: string) => void;
+  onCustomAreaChange: (customValue: string) => void;
+}): ReactNode {
+  const errorId: string = "area-error";
+  const areas: readonly string[] = useMemo(
+    () => (governorate ? KUWAIT_AREAS_BY_GOVERNORATE[governorate] ?? [] : []),
+    [governorate]
+  );
+
+  const selectValue: string = customAreaMode
+    ? OTHER_AREA_VALUE
+    : areas.includes(value)
+      ? value
+      : areas[0] ?? "";
+
+  return (
+    <div>
+      <FieldLabel htmlFor="area">Area</FieldLabel>
+      <select
+        id="area"
+        name="areaSelect"
+        value={selectValue}
+        disabled={!governorate}
+        aria-invalid={Boolean(error)}
+        aria-describedby={error ? errorId : undefined}
+        onChange={(e) => onSelectChange(e.target.value)}
+        className={`${selectClass(Boolean(error))} disabled:bg-[#f8f9fa] disabled:text-[#6c757d]`}
+        style={SELECT_CHEVRON_STYLE}
+      >
+        {!governorate ? (
+          <option value="">Select Governorate first</option>
+        ) : (
+          <>
+            {areas.map((areaName) => (
+              <option key={areaName} value={areaName}>
+                {areaName}
+              </option>
+            ))}
+            <option value={OTHER_AREA_VALUE}>Other (Type area manually)</option>
+          </>
+        )}
+      </select>
+
+      {customAreaMode && (
+        <input
+          type="text"
+          id="area-custom"
+          name="area"
+          value={value}
+          placeholder="Enter your area name"
+          aria-label="Custom area name"
+          onChange={(e) => onCustomAreaChange(e.target.value)}
+          className={`${inputClass(Boolean(error))} mt-2`}
+        />
+      )}
+
+      <FieldError id={errorId} message={error} />
+    </div>
+  );
+}
+
 function SectionCard({
   step,
   title,
+  badge,
   children,
 }: {
   step: number;
   title: string;
+  badge?: string;
   children: ReactNode;
 }): ReactNode {
   return (
     <section className="bg-white border border-[#f1f5f9] rounded-lg p-5 sm:p-6">
-      <h2 className="flex items-center gap-3 text-[16px] font-bold text-[#212529] mb-5">
-        <span className="w-7 h-7 rounded-full bg-[#e91e63] text-white text-[13px] font-bold flex items-center justify-center">
-          {step}
-        </span>
-        {title}
-      </h2>
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-5">
+        <h2 className="flex items-center gap-3 text-[16px] font-bold text-[#212529]">
+          <span className="w-7 h-7 rounded-full bg-[#e91e63] text-white text-[13px] font-bold flex items-center justify-center">
+            {step}
+          </span>
+          {title}
+        </h2>
+        {badge && (
+          <span className="rounded-full bg-[#fff5f8] px-3 py-1 text-[12px] font-semibold text-[#e91e63]">
+            {badge}
+          </span>
+        )}
+      </div>
       {children}
     </section>
   );
@@ -393,6 +487,7 @@ function OrderSummary({
   itemCount,
   deliveryFee,
   total,
+  isBuyNowMode,
   onQuantityChange,
   onRemove,
 }: {
@@ -401,14 +496,20 @@ function OrderSummary({
   itemCount: number;
   deliveryFee: number;
   total: number;
+  isBuyNowMode: boolean;
   onQuantityChange: (id: string, quantity: number) => void;
   onRemove: (id: string) => void;
 }): ReactNode {
   return (
     <aside className="lg:sticky lg:top-28 bg-[#f8f9fa] border border-[#f1f5f9] rounded-lg p-5 sm:p-6">
-      <h2 className="text-[16px] font-bold uppercase tracking-wide pb-4 border-b border-[#dee2e6]">
-        Order summary
-      </h2>
+      <div className="flex items-center justify-between pb-4 border-b border-[#dee2e6]">
+        <h2 className="text-[16px] font-bold uppercase tracking-wide">Order summary</h2>
+        {isBuyNowMode && (
+          <span className="rounded bg-[#e91e63] px-2 py-0.5 text-[11px] font-bold uppercase text-white">
+            Buy Now
+          </span>
+        )}
+      </div>
 
       <ul className="divide-y divide-[#e9ecef]">
         {items.map((item) => (
@@ -448,13 +549,15 @@ function OrderSummary({
                   {formatKD(item.price * item.quantity)}
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={() => onRemove(item.id)}
-                className="mt-2 text-[12px] text-[#6c757d] underline underline-offset-2 hover:text-[#e91e63]"
-              >
-                Remove
-              </button>
+              {!isBuyNowMode && (
+                <button
+                  type="button"
+                  onClick={() => onRemove(item.id)}
+                  className="mt-2 text-[12px] text-[#6c757d] underline underline-offset-2 hover:text-[#e91e63]"
+                >
+                  Remove
+                </button>
+              )}
             </div>
           </li>
         ))}
@@ -466,7 +569,7 @@ function OrderSummary({
           <dd className="font-semibold text-[#212529]">{formatKD(subtotal)}</dd>
         </div>
         <div className="flex justify-between">
-          <dt className="text-[#6c757d]">Delivery</dt>
+          <dt className="text-[#6c757d]">Delivery (Kuwait)</dt>
           <dd className="font-semibold text-[#212529]">{formatKD(deliveryFee)}</dd>
         </div>
         <div className="flex justify-between items-baseline pt-4 border-t border-[#dee2e6]">
@@ -480,13 +583,13 @@ function OrderSummary({
           <span className="text-[#198754]">
             <LockIcon />
           </span>
-          Secure checkout
+          Secure WhatsApp-confirmed checkout
         </li>
         <li className="flex items-center gap-2">
           <span className="text-[#198754]">
             <CheckIcon size={16} />
           </span>
-          Refund and returns policy applies
+          Cash on Delivery across all Kuwait Governorates
         </li>
       </ul>
     </aside>
@@ -494,27 +597,46 @@ function OrderSummary({
 }
 
 /* ============================================================
-   PAGE
-   Header and footer come from app/layout.tsx (SiteHeader / SiteFooter).
+   CHECKOUT CONTENT
    ============================================================ */
-export default function CheckoutPage(): ReactNode {
+function CheckoutContent(): ReactNode {
+  const searchParams = useSearchParams();
+  const isBuyNowMode: boolean = searchParams.get("mode") === "buy_now";
+
   const [cart, setCart] = useState<CartItem[]>([]);
+  const [expressItem, setExpressItem] = useState<CartItem | null>(null);
   const [hydrated, setHydrated] = useState<boolean>(false);
   const [form, setForm] = useState<CheckoutForm>(EMPTY_FORM);
+  const [customAreaMode, setCustomAreaMode] = useState<boolean>(false);
   const [errors, setErrors] = useState<FormErrors>({});
+  const [autofillNotice, setAutofillNotice] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [orderRef, setOrderRef] = useState<string | null>(null);
-  const [orderEmail, setOrderEmail] = useState<string>("");
+  const [orderPhone, setOrderPhone] = useState<string>("");
 
-  /* Blocks a second submit even when two clicks arrive before React re-renders */
   const submittingRef = useRef<boolean>(false);
+  const idempotencyKeyRef = useRef<string>("");
 
-  /* Read the cart from localStorage and keep it in sync */
+  useEffect(() => {
+    idempotencyKeyRef.current = newIdempotencyKey();
+  }, []);
+
   useEffect(() => {
     const sync = (): void => setCart(readCart());
     sync();
-    // Hydrate from localStorage after mount to avoid an SSR mismatch.
+
+    if (isBuyNowMode) {
+      try {
+        const rawExpress = sessionStorage.getItem(EXPRESS_BUY_NOW_KEY);
+        if (rawExpress) {
+          setExpressItem(JSON.parse(rawExpress) as CartItem);
+        }
+      } catch {
+        // Fallback to regular cart
+      }
+    }
+
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setHydrated(true);
     window.addEventListener(CART_EVENT, sync);
@@ -523,12 +645,46 @@ export default function CheckoutPage(): ReactNode {
       window.removeEventListener(CART_EVENT, sync);
       window.removeEventListener("storage", sync);
     };
-  }, []);
+  }, [isBuyNowMode]);
 
-  const subtotal: number = useMemo(() => getCartSubtotal(cart), [cart]);
-  const itemCount: number = useMemo(() => getCartCount(cart), [cart]);
+  useEffect(() => {
+    const cleanDigits: string = normalizeKuwaitPhone(form.phone);
+    if (!KUWAIT_MOBILE_RE.test(cleanDigits)) {
+      setAutofillNotice(null);
+      return;
+    }
 
-  /* Flat delivery fee. The server uses the same value from lib/orders.ts. */
+    try {
+      const savedRaw = localStorage.getItem(`${SAVED_KW_ADDRESS_PREFIX}${cleanDigits}`);
+      if (savedRaw) {
+        const saved = JSON.parse(savedRaw) as Partial<CheckoutForm>;
+        setForm((prev) => ({
+          ...prev,
+          firstName: prev.firstName || saved.firstName || "",
+          lastName: prev.lastName || saved.lastName || "",
+          email: prev.email || saved.email || "",
+          governorate: prev.governorate || saved.governorate || "",
+          area: prev.area || saved.area || "",
+          block: prev.block || saved.block || "",
+          street: prev.street || saved.street || "",
+          building: prev.building || saved.building || "",
+          floor: prev.floor || saved.floor || "",
+          apartment: prev.apartment || saved.apartment || "",
+        }));
+        setAutofillNotice("Welcome back! Saved Kuwait address autofilled from your WhatsApp number.");
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }, [form.phone]);
+
+  const activeItems: CartItem[] = useMemo(() => {
+    if (isBuyNowMode && expressItem) return [expressItem];
+    return cart;
+  }, [isBuyNowMode, expressItem, cart]);
+
+  const subtotal: number = useMemo(() => getCartSubtotal(activeItems), [activeItems]);
+  const itemCount: number = useMemo(() => getCartCount(activeItems), [activeItems]);
   const deliveryFee: number = subtotal > 0 ? DELIVERY_FEE_KD : 0;
   const total: number = subtotal + deliveryFee;
 
@@ -542,9 +698,51 @@ export default function CheckoutPage(): ReactNode {
     });
   };
 
+  const handleGovernorateChange = (newGov: string): void => {
+    const govAreas = newGov ? KUWAIT_AREAS_BY_GOVERNORATE[newGov] ?? [] : [];
+    const firstArea = govAreas[0] ?? "";
+    setCustomAreaMode(false);
+    setForm((prev) => ({
+      ...prev,
+      governorate: newGov,
+      area: firstArea,
+    }));
+    setErrors((prev) => {
+      const next: FormErrors = { ...prev };
+      delete next.governorate;
+      delete next.area;
+      return next;
+    });
+  };
+
+  const handleAreaSelectChange = (selectedVal: string): void => {
+    if (selectedVal === OTHER_AREA_VALUE) {
+      setCustomAreaMode(true);
+      updateField("area", "");
+      return;
+    }
+    setCustomAreaMode(false);
+    updateField("area", selectedVal);
+  };
+
+  const handleQuantityChange = (id: string, qty: number): void => {
+    if (isBuyNowMode && expressItem) {
+      const clamped = Math.min(50, Math.max(1, qty));
+      const updated = { ...expressItem, quantity: clamped };
+      setExpressItem(updated);
+      try {
+        sessionStorage.setItem(EXPRESS_BUY_NOW_KEY, JSON.stringify(updated));
+      } catch {
+        // Ignore
+      }
+      return;
+    }
+    updateCartQuantity(id, qty);
+  };
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (cart.length === 0 || submittingRef.current) return;
+    if (activeItems.length === 0 || submittingRef.current) return;
 
     const nextErrors: FormErrors = validate(form);
     setErrors(nextErrors);
@@ -560,11 +758,45 @@ export default function CheckoutPage(): ReactNode {
     setSubmitting(true);
 
     try {
-      const order: CreateOrderResponse = await placeOrder(form, cart);
+      const order: CreateOrderResponse = await placeOrder(
+        form,
+        activeItems,
+        idempotencyKeyRef.current || newIdempotencyKey()
+      );
 
-      /* Clear the cart only after the server confirms the order */
-      clearCart();
-      setOrderEmail(order.email);
+      const cleanDigits: string = normalizeKuwaitPhone(form.phone);
+      try {
+        localStorage.setItem(
+          `${SAVED_KW_ADDRESS_PREFIX}${cleanDigits}`,
+          JSON.stringify({
+            firstName: form.firstName.trim(),
+            lastName: form.lastName.trim(),
+            email: form.email.trim(),
+            governorate: form.governorate,
+            area: form.area.trim(),
+            block: form.block.trim(),
+            street: form.street.trim(),
+            building: form.building.trim(),
+            floor: form.floor.trim(),
+            apartment: form.apartment.trim(),
+          })
+        );
+      } catch {
+        // Ignore storage errors
+      }
+
+      if (isBuyNowMode && expressItem) {
+        try {
+          sessionStorage.removeItem(EXPRESS_BUY_NOW_KEY);
+        } catch {
+          // Ignore
+        }
+        setExpressItem(null);
+      } else {
+        clearCart();
+      }
+
+      setOrderPhone(order.phone);
       setOrderRef(order.orderNumber);
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (err: unknown) {
@@ -588,15 +820,12 @@ export default function CheckoutPage(): ReactNode {
     }
   };
 
-  const showEmpty: boolean = hydrated && cart.length === 0 && orderRef === null;
+  const showEmpty: boolean = hydrated && activeItems.length === 0 && orderRef === null;
   const showSuccess: boolean = orderRef !== null;
-
-  /* Step 2 (Checkout) while filling the form, step 3 (Order Complete) after success */
   const currentStep: number = showSuccess ? 2 : 1;
 
   return (
     <>
-      {/* Page title and breadcrumb */}
       <section className="bg-[#f8f9fa] border-b border-[#f1f5f9]">
         <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 py-8 text-center">
           <h1 className="text-3xl sm:text-4xl font-bold tracking-tight text-[#212529]">Checkout</h1>
@@ -610,7 +839,6 @@ export default function CheckoutPage(): ReactNode {
 
       <section className="bg-white py-8 sm:py-10">
         <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0">
-          {/* Checkout progress indicator (shared component) */}
           <div className="mb-8">
             <CheckoutSteps current={currentStep} />
           </div>
@@ -642,11 +870,11 @@ export default function CheckoutPage(): ReactNode {
               </span>
               <h2 className="mt-5 text-[24px] font-bold text-[#212529]">Thank you for your order</h2>
               <p className="mt-2 text-[15px] text-[#6c757d]">
-                Your order number is <span className="font-semibold text-[#212529]">#{orderRef}</span>. A confirmation
-                will be sent to <span className="font-semibold text-[#212529]">{orderEmail}</span>.
+                Your order number is <span className="font-semibold text-[#212529]">#{orderRef}</span>. Updates will be
+                sent to your WhatsApp <span className="font-semibold text-[#212529]">{orderPhone}</span>.
               </p>
               <p className="mt-2 text-[13px] text-[#6c757d]">
-                Use this number and your email or mobile number to track your order.
+                Use your order number and mobile number to track your delivery anytime.
               </p>
               <div className="mt-8 flex flex-col sm:flex-row gap-3 justify-center">
                 <Link
@@ -665,43 +893,63 @@ export default function CheckoutPage(): ReactNode {
             </div>
           )}
 
-          {hydrated && cart.length > 0 && !showSuccess && (
+          {hydrated && activeItems.length > 0 && !showSuccess && (
             <div className="grid gap-8 lg:grid-cols-[1fr_380px] items-start">
-              {/* Left: checkout form */}
               <form id="checkout-form" onSubmit={handleSubmit} noValidate className="space-y-6">
-                <SectionCard step={1} title="Contact information">
+                <SectionCard step={1} title="WhatsApp & Contact Info" badge="WhatsApp-First • Email Optional">
+                  {autofillNotice && (
+                    <div className="mb-4 rounded-md border border-[#198754]/30 bg-[#e8f5ee] px-4 py-2.5 text-[13px] font-medium text-[#198754]">
+                      {autofillNotice}
+                    </div>
+                  )}
+
                   <div className="grid gap-5 sm:grid-cols-2">
+                    <div className="sm:col-span-2">
+                      <FieldLabel htmlFor="phone">Kuwait WhatsApp Number</FieldLabel>
+                      <div className="flex">
+                        <span className="inline-flex h-12 items-center rounded-l-md border border-r-0 border-[#dee2e6] bg-[#f8f9fa] px-4 text-[15px] font-semibold text-[#212529]">
+                          +965
+                        </span>
+                        <input
+                          id="phone"
+                          name="phone"
+                          type="tel"
+                          maxLength={8}
+                          value={form.phone}
+                          placeholder="5XXX XXXX"
+                          autoComplete="tel-national"
+                          inputMode="tel"
+                          aria-invalid={Boolean(errors.phone)}
+                          aria-describedby={errors.phone ? "phone-error" : undefined}
+                          onChange={(e) =>
+                            updateField("phone", e.target.value.replace(/\D/g, "").slice(0, 8))
+                          }
+                          className={`${inputClass(Boolean(errors.phone))} rounded-l-none`}
+                        />
+                      </div>
+                      <FieldError id="phone-error" message={errors.phone} />
+                      <p className="mt-1.5 text-[12px] text-[#6c757d]">
+                        Order confirmation & rider updates will be sent on WhatsApp.
+                      </p>
+                    </div>
+
                     <TextField
                       name="email"
                       label="Email address"
                       type="email"
+                      optional
                       value={form.email}
                       error={errors.email}
                       onChange={(v) => updateField("email", v)}
                       autoComplete="email"
                       inputMode="email"
-                      placeholder="you@example.com"
-                      className="sm:col-span-2"
-                    />
-                    <TextField
-                      name="phone"
-                      label="Mobile number"
-                      type="tel"
-                      value={form.phone}
-                      error={errors.phone}
-                      onChange={(v) => updateField("phone", v)}
-                      autoComplete="tel-national"
-                      inputMode="tel"
-                      placeholder="5XXX XXXX"
+                      placeholder="you@example.com (optional)"
                       className="sm:col-span-2"
                     />
                   </div>
-                  <p className="mt-3 text-[12px] text-[#6c757d]">
-                    Enter your 8-digit Kuwait mobile number. The +965 code is already included.
-                  </p>
                 </SectionCard>
 
-                <SectionCard step={2} title="Delivery address">
+                <SectionCard step={2} title="Kuwait Delivery Address">
                   <div className="grid gap-5 sm:grid-cols-2">
                     <TextField
                       name="firstName"
@@ -723,15 +971,16 @@ export default function CheckoutPage(): ReactNode {
                     <GovernorateField
                       value={form.governorate}
                       error={errors.governorate}
-                      onChange={(v) => updateField("governorate", v)}
+                      onChange={handleGovernorateChange}
                     />
-                    <TextField
-                      name="area"
-                      label="Area"
-                      placeholder="e.g. Salmiya"
+
+                    <AreaSelectField
+                      governorate={form.governorate}
                       value={form.area}
+                      customAreaMode={customAreaMode}
                       error={errors.area}
-                      onChange={(v) => updateField("area", v)}
+                      onSelectChange={handleAreaSelectChange}
+                      onCustomAreaChange={(v) => updateField("area", v)}
                     />
 
                     <TextField
@@ -795,8 +1044,8 @@ export default function CheckoutPage(): ReactNode {
                   </div>
 
                   <p className="mt-4 text-[13px] text-[#6c757d]">
-                    Flat delivery fee: <span className="font-semibold text-[#212529]">{formatKD(DELIVERY_FEE_KD)}</span> on
-                    every order.
+                    Flat delivery fee across Kuwait:{" "}
+                    <span className="font-semibold text-[#212529]">{formatKD(DELIVERY_FEE_KD)}</span>.
                   </p>
                 </SectionCard>
 
@@ -843,14 +1092,14 @@ export default function CheckoutPage(): ReactNode {
                 </div>
               </form>
 
-              {/* Right: order summary */}
               <OrderSummary
-                items={cart}
+                items={activeItems}
                 subtotal={subtotal}
                 itemCount={itemCount}
                 deliveryFee={deliveryFee}
                 total={total}
-                onQuantityChange={(id, qty) => updateCartQuantity(id, qty)}
+                isBuyNowMode={isBuyNowMode && Boolean(expressItem)}
+                onQuantityChange={handleQuantityChange}
                 onRemove={(id) => removeFromCart(id)}
               />
             </div>
@@ -858,5 +1107,13 @@ export default function CheckoutPage(): ReactNode {
         </div>
       </section>
     </>
+  );
+}
+
+export default function CheckoutPage(): ReactNode {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-white" aria-busy="true" />}>
+      <CheckoutContent />
+    </Suspense>
   );
 }

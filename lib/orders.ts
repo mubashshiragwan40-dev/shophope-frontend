@@ -17,6 +17,104 @@ export const KUWAIT_GOVERNORATES: readonly string[] = [
   "Al Jahra",
 ];
 
+export const KUWAIT_AREAS_BY_GOVERNORATE: Record<string, readonly string[]> = {
+  "Al Asimah": [
+    "Kuwait City",
+    "Sharq",
+    "Dasman",
+    "Mirqab",
+    "Dasma",
+    "Daiya",
+    "Mansouriya",
+    "Abdullah Al-Salem",
+    "Nuzha",
+    "Faiha",
+    "Shamiya",
+    "Rawda",
+    "Adailiya",
+    "Khaldiya",
+    "Kaifan",
+    "Qadsiya",
+    "Surra",
+    "Qortuba",
+    "Yarmouk",
+    "Shuwaikh",
+  ],
+  Hawalli: [
+    "Hawalli",
+    "Salmiya",
+    "Jabriya",
+    "Rumaithiya",
+    "Salwa",
+    "Bayan",
+    "Mishref",
+    "Mubarak Al-Abdullah",
+    "Shaab",
+    "Zahra",
+    "Hateen",
+    "Shuhada",
+    "Siddiq",
+    "Salam",
+  ],
+  Farwaniya: [
+    "Farwaniya",
+    "Khaitan",
+    "Jleeb Al-Shuyoukh",
+    "Abbasiya",
+    "Ardiya",
+    "Rabiya",
+    "Rehab",
+    "Omariya",
+    "Andalous",
+    "Riggae",
+    "Firdous",
+    "Sabah Al-Nasser",
+    "Abdullah Al-Mubarak",
+    "Ishbiliya",
+    "Dajeej",
+  ],
+  "Mubarak Al-Kabeer": [
+    "Mubarak Al-Kabeer",
+    "Sabah Al-Salem",
+    "Qurain",
+    "Qusour",
+    "Adan",
+    "Messila",
+    "Abu Fatira",
+    "Abu Al Hasaniya",
+    "Fnaitees",
+    "Masayel",
+  ],
+  "Al Ahmadi": [
+    "Fahaheel",
+    "Mangaf",
+    "Mahboula",
+    "Abu Halifa",
+    "Fintas",
+    "Eqaila",
+    "Riqqa",
+    "Hadiya",
+    "Sabahiya",
+    "Ahmadi",
+    "Jaber Al-Ali",
+    "Fahad Al-Ahmad",
+    "Ali Sabah Al-Salem",
+    "Sabah Al-Ahmad",
+  ],
+  "Al Jahra": [
+    "Jahra",
+    "Saad Al-Abdullah",
+    "Qasr",
+    "Naeem",
+    "Oyoun",
+    "Taima",
+    "Waha",
+    "Naseem",
+    "Sulaibiya",
+    "Abdali",
+  ],
+};
+
 /* ============================================================
    CHECKOUT TYPES
    ============================================================ */
@@ -32,7 +130,7 @@ export interface CartLine {
 export interface CheckoutCustomer {
   firstName: string;
   lastName: string;
-  email: string;
+  email?: string; // Optional for WhatsApp-first checkout
   phone: string; // stored as +965XXXXXXXX
   governorate: string;
   area: string;
@@ -54,7 +152,8 @@ export interface CreateOrderRequest {
 export interface CreateOrderResponse {
   orderId: number;
   orderNumber: string;
-  email: string;
+  email?: string;
+  phone: string;
 }
 
 /* ============================================================
@@ -100,7 +199,6 @@ export interface TrackedOrder {
 
 /* ============================================================
    LABELS AND TIMELINE
-   Keep your own wording if you already had these. The keys must stay the same.
    ============================================================ */
 
 export const STATUS_LABELS: Record<OrderStatus, string> = {

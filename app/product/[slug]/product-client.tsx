@@ -1,11 +1,12 @@
-// app/product/[slug]/page.tsx
+// app/product/[slug]/product-client.tsx
 "use client";
 
 import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { addToCart } from "@/lib/cart";
+import { useParams, useRouter } from "next/navigation";
+import { addToCart, formatKD, type CartItem } from "@/lib/cart";
 import { WISHLIST_EVENT, readWishlist, toggleWishlist } from "@/lib/wishlist";
+import ProtectedProductImage from "@/components/protected-product-image";
 
 /* ============================================================
    TYPES
@@ -46,6 +47,8 @@ interface InfoItem {
 const API_URL: string =
   process.env.NEXT_PUBLIC_WORDPRESS_API_URL || "http://localhost/shophope/graphql";
 
+export const EXPRESS_BUY_NOW_KEY: string = "shophope-express-buy-now";
+
 const PRODUCT_QUERY: string = `
   query GetProduct($slug: ID!) {
     product(id: $slug, idType: SLUG) {
@@ -56,6 +59,10 @@ const PRODUCT_QUERY: string = `
       description
       shortDescription
       ... on SimpleProduct {
+        price
+        regularPrice
+      }
+      ... on VariableProduct {
         price
         regularPrice
       }
@@ -90,6 +97,10 @@ const RELATED_QUERY: string = `
           price
           regularPrice
         }
+        ... on VariableProduct {
+          price
+          regularPrice
+        }
         image {
           sourceUrl
         }
@@ -105,19 +116,19 @@ const RELATED_QUERY: string = `
 `;
 
 const SHIPPING_POINTS: string[] = [
-  "The product will be shipped within 2-3 working days and delivered within 4-5 working days from the day of dispatch.",
-  "We dispatch your shipment within 24 hours of you making a request to ship.",
-  "Your order will reach you safe and sound within 3-6 days.",
-  "Tracking is available for all products, so you can follow your delivery from dispatch to arrival.",
+  "Fast delivery across all 6 Kuwait Governorates within 24–48 hours.",
+  "Cash on Delivery (COD) available on all orders across Kuwait.",
+  "Easy 7-day exchange and return support via WhatsApp.",
+  "Order tracking is available anytime on our Track Order page.",
 ];
 
 /* ============================================================
    HELPERS
    ============================================================ */
 function htmlToText(html: string): string {
-  if (typeof window === "undefined") return html.replace(/<[^>]*>/g, "");
+  if (typeof window === "undefined") return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
   const doc = new DOMParser().parseFromString(html, "text/html");
-  return doc.body.textContent ?? "";
+  return (doc.body.textContent ?? "").trim();
 }
 
 function parseAmount(html: string | null | undefined): number | null {
@@ -135,10 +146,9 @@ function getDiscountPercent(price: string | null, regularPrice: string | null): 
   return Math.round(((regular - current) / regular) * 100);
 }
 
-/** WooCommerce description comes as HTML. Strip tags for plain display. */
 function stripHtml(html: string | null | undefined): string {
   if (!html) return "";
-  return htmlToText(html).trim();
+  return htmlToText(html);
 }
 
 /* ============================================================
@@ -164,9 +174,6 @@ function ProductGallery({
   src: string | null;
   discount: number | null;
 }): ReactNode {
-  const [imgFailed, setImgFailed] = useState<boolean>(false);
-  const showImage: boolean = Boolean(src) && !imgFailed;
-
   return (
     <div className="relative w-full aspect-square bg-[#f8f9fa] border border-[#f1f5f9] overflow-hidden">
       {discount !== null && (
@@ -175,29 +182,18 @@ function ProductGallery({
         </span>
       )}
 
-      {showImage ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={src ?? undefined}
-          alt={name}
-          onError={() => setImgFailed(true)}
-          className="w-full h-full object-contain p-6"
-        />
-      ) : (
-        <div className="w-full h-full flex items-center justify-center">
-          <svg viewBox="0 0 200 150" className="max-h-[160px] w-auto" role="img" aria-label="Product image placeholder">
-            <rect x="62" y="40" width="76" height="76" rx="14" fill="#ffffff" stroke="#212529" strokeWidth="5" />
-            <rect x="76" y="22" width="48" height="20" rx="6" fill="#e91e63" />
-            <circle cx="100" cy="80" r="16" fill="#fde4ec" />
-          </svg>
-        </div>
-      )}
+      <ProtectedProductImage
+        src={src}
+        alt={name}
+        loading="eager"
+        imgClassName="w-full h-full object-contain p-6"
+      />
     </div>
   );
 }
 
 /* ============================================================
-   INFO ACCORDION (Description / Shipping & Delivery)
+   INFO ACCORDION
    ============================================================ */
 function InfoAccordion({ items }: { items: InfoItem[] }): ReactNode {
   const [openId, setOpenId] = useState<string | null>(items[0]?.id ?? null);
@@ -251,7 +247,6 @@ function InfoAccordion({ items }: { items: InfoItem[] }): ReactNode {
 function ShareButtons({ title }: { title: string }): ReactNode {
   const [copied, setCopied] = useState<boolean>(false);
 
-  // Browser URL for share links. The server renders an empty string.
   const url: string = useSyncExternalStore(
     () => () => {},
     () => window.location.href,
@@ -262,11 +257,10 @@ function ShareButtons({ title }: { title: string }): ReactNode {
   const encodedTitle: string = encodeURIComponent(title);
 
   const shareLinks: Array<{ label: string; href: string }> = [
-    { label: "Facebook", href: `https://www.facebook.com/sharer/sharer.php?u=${encodedUrl}` },
     { label: "WhatsApp", href: `https://wa.me/?text=${encodeURIComponent(`${title} ${url}`)}` },
+    { label: "Facebook", href: `https://www.facebook.com/sharer/sharer.php?u=${encodedUrl}` },
     { label: "X", href: `https://twitter.com/intent/tweet?url=${encodedUrl}&text=${encodedTitle}` },
     { label: "Pinterest", href: `https://pinterest.com/pin/create/button/?url=${encodedUrl}&description=${encodedTitle}` },
-    { label: "Email", href: `mailto:?subject=${encodedTitle}&body=${encodedUrl}` },
   ];
 
   const handleCopy = async (): Promise<void> => {
@@ -308,10 +302,10 @@ function ShareButtons({ title }: { title: string }): ReactNode {
    RELATED PRODUCT CARD
    ============================================================ */
 function RelatedCard({ product }: { product: GraphQLProduct }): ReactNode {
-  const [imgFailed, setImgFailed] = useState<boolean>(false);
   const discount: number | null = getDiscountPercent(product.price, product.regularPrice);
-  const showImage: boolean = Boolean(product.image?.sourceUrl) && !imgFailed;
   const href: string = `/product/${product.slug}`;
+  const priceNum: number | null = parseAmount(product.price);
+  const regularNum: number | null = parseAmount(product.regularPrice);
 
   return (
     <article className="group relative flex flex-col h-full bg-white border border-[#f1f5f9] shadow-[0_2px_12px_rgba(33,37,41,0.06)] hover:shadow-[0_10px_30px_rgba(33,37,41,0.12)] transition-shadow duration-300">
@@ -323,24 +317,11 @@ function RelatedCard({ product }: { product: GraphQLProduct }): ReactNode {
 
       <div className="p-3 pb-0">
         <Link href={href} aria-label={product.name} className="block w-full aspect-square overflow-hidden bg-[#f8f9fa]">
-          {showImage ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={product.image?.sourceUrl}
-              alt={product.name}
-              loading="lazy"
-              onError={() => setImgFailed(true)}
-              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center">
-              <svg viewBox="0 0 200 150" className="max-h-[120px] w-auto" role="img" aria-label="Product image placeholder">
-                <rect x="62" y="40" width="76" height="76" rx="14" fill="#ffffff" stroke="#212529" strokeWidth="5" />
-                <rect x="76" y="22" width="48" height="20" rx="6" fill="#e91e63" />
-                <circle cx="100" cy="80" r="16" fill="#fde4ec" />
-              </svg>
-            </div>
-          )}
+          <ProtectedProductImage
+            src={product.image?.sourceUrl}
+            alt={product.name}
+            imgClassName="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+          />
         </Link>
       </div>
 
@@ -354,11 +335,11 @@ function RelatedCard({ product }: { product: GraphQLProduct }): ReactNode {
         </Link>
 
         <div className="mt-auto pt-3 flex flex-wrap items-baseline gap-2">
-          {product.price && (
-            <span className="text-[16px] font-bold text-[#e91e63]" dangerouslySetInnerHTML={{ __html: product.price }} />
+          {priceNum !== null && (
+            <span className="text-[16px] font-bold text-[#e91e63]">{formatKD(priceNum)}</span>
           )}
-          {discount !== null && product.regularPrice && (
-            <span className="text-[14px] text-[#6c757d] line-through" dangerouslySetInnerHTML={{ __html: product.regularPrice }} />
+          {discount !== null && regularNum !== null && (
+            <span className="text-[14px] text-[#6c757d] line-through">{formatKD(regularNum)}</span>
           )}
         </div>
 
@@ -375,10 +356,9 @@ function RelatedCard({ product }: { product: GraphQLProduct }): ReactNode {
 
 /* ============================================================
    PAGE
-   Header and footer come from app/layout.tsx (SiteHeader / SiteFooter).
    ============================================================ */
-// AFTER
 export default function ProductClient(): ReactNode {
+  const router = useRouter();
   const params = useParams<{ slug: string }>();
   const slug: string = typeof params?.slug === "string" ? params.slug : "";
 
@@ -392,7 +372,6 @@ export default function ProductClient(): ReactNode {
   const [isWishlisted, setIsWishlisted] = useState<boolean>(false);
   const [toast, setToast] = useState<string | null>(null);
 
-  /* Keep the heart in sync with the localStorage wishlist */
   useEffect(() => {
     if (!product) return;
     const sync = (): void => setIsWishlisted(readWishlist().some((i) => i.id === product.id));
@@ -405,7 +384,6 @@ export default function ProductClient(): ReactNode {
     };
   }, [product]);
 
-  /* Fetch product and related products */
   useEffect(() => {
     if (!slug) return;
     const controller = new AbortController();
@@ -457,7 +435,6 @@ export default function ProductClient(): ReactNode {
     return () => controller.abort();
   }, [slug, reloadKey]);
 
-  /* Toast auto-hide */
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), 2200);
@@ -469,9 +446,19 @@ export default function ProductClient(): ReactNode {
     [product]
   );
 
+  const priceNum: number | null = useMemo(
+    () => (product ? parseAmount(product.price) : null),
+    [product]
+  );
+  const regularNum: number | null = useMemo(
+    () => (product ? parseAmount(product.regularPrice) : null),
+    [product]
+  );
+
   const categories: Array<{ name: string; slug: string }> = product?.productCategories?.nodes ?? [];
   const tags: Array<{ name: string; slug: string }> = product?.productTags?.nodes ?? [];
-  const descriptionText: string = stripHtml(product?.description) || stripHtml(product?.shortDescription);
+  const shortDescriptionText: string = stripHtml(product?.shortDescription);
+  const descriptionText: string = stripHtml(product?.description) || shortDescriptionText;
 
   const infoItems: InfoItem[] = [
     {
@@ -481,47 +468,64 @@ export default function ProductClient(): ReactNode {
     },
     {
       id: "shipping",
-      title: "Shipping & Delivery",
+      title: "Shipping & Delivery (Kuwait)",
       content: (
-        <div className="space-y-5">
-          <div>
-            <h3 className="text-[14px] font-bold uppercase text-[#212529] mb-2">Fast and safe delivery</h3>
-            <p>
-              We deliver your product with safety and security in mind. You can track your product&apos;s progress
-              through the delivery process.
-            </p>
-          </div>
-          <div>
-            <h3 className="text-[14px] font-bold uppercase text-[#212529] mb-2">Our shipping system</h3>
-            <ul className="list-disc pl-5 space-y-2">
-              {SHIPPING_POINTS.map((point) => (
-                <li key={point}>{point}</li>
-              ))}
-            </ul>
-          </div>
+        <div className="space-y-4">
+          <p>
+            We deliver safely across all Kuwait Governorates with Cash on Delivery (COD) and real-time order tracking.
+          </p>
+          <ul className="list-disc pl-5 space-y-2">
+            {SHIPPING_POINTS.map((point) => (
+              <li key={point}>{point}</li>
+            ))}
+          </ul>
         </div>
       ),
     },
   ];
 
-  /* Adds to the shared cart. The header updates itself via CART_EVENT. */
   const handleAddToCart = (): void => {
-    if (!product) return;
-    const price: number = parseAmount(product.price) ?? 0;
+    if (!product || priceNum === null) return;
     addToCart(
       {
         id: String(product.databaseId),
         slug: product.slug,
         name: product.name,
         image: product.image?.sourceUrl ?? null,
-        price,
+        price: priceNum,
       },
       quantity
     );
     setToast(`Added: ${product.name} (x${quantity})`);
   };
 
-  /* Save the product to localStorage so the wishlist page can show it */
+  const handleBuyNow = (): void => {
+    if (!product || priceNum === null) return;
+    const expressItem: CartItem = {
+      id: String(product.databaseId),
+      slug: product.slug,
+      name: product.name,
+      image: product.image?.sourceUrl ?? null,
+      price: priceNum,
+      quantity,
+    };
+    try {
+      sessionStorage.setItem(EXPRESS_BUY_NOW_KEY, JSON.stringify(expressItem));
+    } catch {
+      addToCart(
+        {
+          id: expressItem.id,
+          slug: expressItem.slug,
+          name: expressItem.name,
+          image: expressItem.image,
+          price: expressItem.price,
+        },
+        quantity
+      );
+    }
+    router.push("/checkout?mode=buy_now");
+  };
+
   const handleToggleWishlist = (): void => {
     if (!product) return;
     const added: boolean = toggleWishlist({
@@ -529,15 +533,14 @@ export default function ProductClient(): ReactNode {
       slug: product.slug,
       name: product.name,
       image: product.image?.sourceUrl ?? null,
-      price: parseAmount(product.price) ?? 0,
+      price: priceNum ?? 0,
     });
     setIsWishlisted(added);
     setToast(added ? "Added to wishlist" : "Removed from wishlist");
   };
 
   return (
-    <>
-      {/* Breadcrumb */}
+    <div className="pb-20 md:pb-0">
       <section className="bg-[#f8f9fa] border-b border-[#f1f5f9]">
         <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 py-4">
           <nav aria-label="Breadcrumb" className="text-sm text-[#6c757d]">
@@ -560,7 +563,6 @@ export default function ProductClient(): ReactNode {
         </div>
       </section>
 
-      {/* Loading */}
       {loading && (
         <section className="bg-white py-10">
           <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 grid gap-10 lg:grid-cols-2">
@@ -574,7 +576,6 @@ export default function ProductClient(): ReactNode {
         </section>
       )}
 
-      {/* Error */}
       {!loading && error && (
         <section className="bg-white py-16">
           <div role="alert" className="max-w-xl mx-auto text-center border border-[#f1f5f9] p-8 bg-[#f8f9fa]">
@@ -591,88 +592,100 @@ export default function ProductClient(): ReactNode {
         </section>
       )}
 
-      {/* Product */}
       {!loading && !error && product && (
         <>
           <section className="bg-white py-8 lg:py-12">
             <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 grid gap-10 lg:grid-cols-2">
-              {/* Left: gallery */}
               <ProductGallery name={product.name} src={product.image?.sourceUrl ?? null} discount={discount} />
 
-              {/* Right: info */}
               <div className="flex flex-col">
                 <h1 className="text-[28px] sm:text-[32px] leading-tight font-semibold text-[#212529]">{product.name}</h1>
 
                 <div className="mt-4 flex flex-wrap items-baseline gap-3">
-                  {product.price && (
-                    <span className="text-[22px] font-bold text-[#e91e63]" dangerouslySetInnerHTML={{ __html: product.price }} />
+                  {priceNum !== null && (
+                    <span className="text-[24px] font-bold text-[#e91e63]">{formatKD(priceNum)}</span>
                   )}
-                  {discount !== null && product.regularPrice && (
-                    <span className="text-[16px] text-[#6c757d] line-through" dangerouslySetInnerHTML={{ __html: product.regularPrice }} />
+                  {discount !== null && regularNum !== null && (
+                    <span className="text-[16px] text-[#6c757d] line-through">{formatKD(regularNum)}</span>
                   )}
                 </div>
 
-                {product.shortDescription && (
-                  <div
-                    className="mt-5 text-[15px] leading-relaxed text-[#495057]"
-                    dangerouslySetInnerHTML={{ __html: product.shortDescription }}
-                  />
+                {shortDescriptionText && (
+                  <p className="mt-5 text-[15px] leading-relaxed text-[#495057] whitespace-pre-line">
+                    {shortDescriptionText}
+                  </p>
                 )}
 
-                {/* Quantity + actions */}
-                <div className="mt-8 flex flex-col sm:flex-row gap-3">
-                  <div className="flex items-center h-[52px] border border-[#dee2e6] rounded-md w-fit">
+                <div className="mt-8 space-y-3">
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center h-[52px] border border-[#dee2e6] rounded-md w-fit">
+                      <button
+                        type="button"
+                        aria-label="Decrease quantity"
+                        onClick={() => setQuantity((q) => Math.max(1, q - 1))}
+                        className="w-12 h-full text-lg hover:text-[#e91e63] transition-colors"
+                      >
+                        −
+                      </button>
+                      <input
+                        type="number"
+                        min={1}
+                        max={50}
+                        value={quantity}
+                        aria-label="Quantity"
+                        onChange={(e) => setQuantity(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}
+                        className="w-12 h-full text-center text-[15px] font-semibold focus:outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                      />
+                      <button
+                        type="button"
+                        aria-label="Increase quantity"
+                        onClick={() => setQuantity((q) => Math.min(50, q + 1))}
+                        className="w-12 h-full text-lg hover:text-[#e91e63] transition-colors"
+                      >
+                        +
+                      </button>
+                    </div>
+
                     <button
                       type="button"
-                      aria-label="Decrease quantity"
-                      onClick={() => setQuantity((q) => Math.max(1, q - 1))}
-                      className="w-12 h-full text-lg hover:text-[#e91e63] transition-colors"
+                      onClick={handleAddToCart}
+                      disabled={priceNum === null}
+                      className="flex-1 h-[52px] px-6 border-2 border-[#e91e63] bg-white hover:bg-[#fff5f8] disabled:border-[#dee2e6] disabled:text-[#6c757d] active:scale-[0.98] text-[#e91e63] text-[14px] font-bold uppercase rounded-md transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63]"
                     >
-                      −
+                      ADD TO CART
                     </button>
-                    <input
-                      type="number"
-                      min={1}
-                      value={quantity}
-                      aria-label="Quantity"
-                      onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
-                      className="w-12 h-full text-center text-[15px] font-semibold focus:outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                    />
+
                     <button
                       type="button"
-                      aria-label="Increase quantity"
-                      onClick={() => setQuantity((q) => q + 1)}
-                      className="w-12 h-full text-lg hover:text-[#e91e63] transition-colors"
+                      onClick={handleToggleWishlist}
+                      aria-pressed={isWishlisted}
+                      aria-label={isWishlisted ? "Remove from wishlist" : "Add to wishlist"}
+                      className={`w-[52px] h-[52px] shrink-0 inline-flex items-center justify-center border rounded-md transition-colors ${
+                        isWishlisted
+                          ? "bg-[#e91e63] border-[#e91e63] text-white"
+                          : "bg-white border-[#dee2e6] text-[#212529] hover:border-[#e91e63] hover:text-[#e91e63]"
+                      }`}
                     >
-                      +
+                      <HeartIcon filled={isWishlisted} />
                     </button>
                   </div>
 
                   <button
                     type="button"
-                    onClick={handleAddToCart}
-                    disabled={!product.price}
-                    className="flex-1 h-[52px] px-8 bg-[#e91e63] hover:bg-[#c2185b] disabled:bg-[#f1f5f9] disabled:text-[#6c757d] active:scale-[0.98] text-white text-[15px] font-semibold uppercase rounded-md transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63] focus-visible:ring-offset-2"
+                    onClick={handleBuyNow}
+                    disabled={priceNum === null}
+                    className="w-full h-[54px] px-8 bg-[#e91e63] hover:bg-[#c2185b] disabled:bg-[#f1f5f9] disabled:text-[#6c757d] active:scale-[0.99] text-white text-[15px] font-bold uppercase tracking-wide rounded-md shadow-sm transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63] focus-visible:ring-offset-2"
                   >
-                    ADD TO CART
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleToggleWishlist}
-                    aria-pressed={isWishlisted}
-                    aria-label={isWishlisted ? "Remove from wishlist" : "Add to wishlist"}
-                    className={`w-[52px] h-[52px] shrink-0 inline-flex items-center justify-center border rounded-md transition-colors ${
-                      isWishlisted
-                        ? "bg-[#e91e63] border-[#e91e63] text-white"
-                        : "bg-white border-[#dee2e6] text-[#212529] hover:border-[#e91e63] hover:text-[#e91e63]"
-                    }`}
-                  >
-                    <HeartIcon filled={isWishlisted} />
+                    BUY NOW — EXPRESS CHECKOUT
                   </button>
                 </div>
 
-                {/* Meta */}
+                <div className="mt-5 grid grid-cols-3 gap-2 rounded-md border border-[#f1f5f9] bg-[#f8f9fa] p-3 text-center text-[12px] font-medium text-[#212529]">
+                  <div>Cash on Delivery (KD)</div>
+                  <div>Fast Kuwait Delivery</div>
+                  <div>Easy 7-Day Returns</div>
+                </div>
+
                 <div className="mt-8 pt-6 border-t border-[#f1f5f9] space-y-4 text-[14px]">
                   {categories.length > 0 && (
                     <p>
@@ -701,13 +714,11 @@ export default function ProductClient(): ReactNode {
                   </div>
                 </div>
 
-                {/* Accordion: Description / Shipping & Delivery */}
                 <InfoAccordion items={infoItems} />
               </div>
             </div>
           </section>
 
-          {/* Related products */}
           {related.length > 0 && (
             <section className="bg-[#f8f9fa] py-12">
               <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0">
@@ -720,19 +731,45 @@ export default function ProductClient(): ReactNode {
               </div>
             </section>
           )}
+
+          <div className="fixed inset-x-0 bottom-0 z-40 flex items-center justify-between gap-2 border-t border-[#dee2e6] bg-white/95 px-4 py-2.5 backdrop-blur md:hidden">
+            <div className="min-w-0">
+              <p className="text-[11px] text-[#6c757d]">Total ({quantity}x)</p>
+              <p className="text-[15px] font-bold text-[#e91e63]">
+                {priceNum !== null ? formatKD(priceNum * quantity) : "—"}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleAddToCart}
+                disabled={priceNum === null}
+                className="h-[44px] px-3.5 border border-[#e91e63] text-[#e91e63] text-[12px] font-bold uppercase rounded-md disabled:opacity-50"
+              >
+                Add Cart
+              </button>
+              <button
+                type="button"
+                onClick={handleBuyNow}
+                disabled={priceNum === null}
+                className="h-[44px] px-4 bg-[#e91e63] hover:bg-[#c2185b] text-white text-[12px] font-bold uppercase rounded-md disabled:opacity-50"
+              >
+                Buy Now
+              </button>
+            </div>
+          </div>
         </>
       )}
 
-      {/* Toast */}
       <div
         aria-live="polite"
-        className={`fixed bottom-6 right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-5 py-3 rounded-lg shadow-xl flex items-center gap-2 transition-all duration-300 ${
+        className={`fixed bottom-20 md:bottom-6 right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-5 py-3 rounded-lg shadow-xl flex items-center gap-2 transition-all duration-300 ${
           toast ? "translate-y-0 opacity-100" : "translate-y-5 opacity-0 pointer-events-none"
         }`}
       >
         <span className="w-2 h-2 rounded-full bg-[#e91e63] shrink-0" />
         <span className="line-clamp-1">{toast ?? ""}</span>
       </div>
-    </>
+    </div>
   );
 }

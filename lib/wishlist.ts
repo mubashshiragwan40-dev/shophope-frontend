@@ -10,18 +10,40 @@ export interface WishlistItem {
 export const WISHLIST_KEY: string = "shophope-wishlist";
 export const WISHLIST_EVENT: string = "shophope-wishlist-updated";
 
+/** Guards against corrupted or old data in localStorage. */
+function isWishlistItem(value: unknown): value is WishlistItem {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Partial<WishlistItem>;
+  return (
+    typeof v.id === "string" &&
+    v.id.length > 0 &&
+    typeof v.slug === "string" &&
+    typeof v.name === "string" &&
+    (typeof v.image === "string" || v.image === null) &&
+    typeof v.price === "number" &&
+    Number.isFinite(v.price)
+  );
+}
+
 export function readWishlist(): WishlistItem[] {
   if (typeof window === "undefined") return [];
   try {
     const raw: string | null = localStorage.getItem(WISHLIST_KEY);
-    return raw ? (JSON.parse(raw) as WishlistItem[]) : [];
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(isWishlistItem) : [];
   } catch {
     return [];
   }
 }
 
 export function writeWishlist(items: WishlistItem[]): void {
-  localStorage.setItem(WISHLIST_KEY, JSON.stringify(items));
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(WISHLIST_KEY, JSON.stringify(items));
+  } catch {
+    /* Storage full or disabled (private mode): keep the page working. */
+  }
   window.dispatchEvent(new Event(WISHLIST_EVENT));
 }
 

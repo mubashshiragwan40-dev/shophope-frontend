@@ -5,6 +5,8 @@
 // page that needs to call the API directly.
 // ------------------------------------------------------------------
 
+const REQUEST_TIMEOUT_MS: number = 15_000;
+
 export class GraphQLError extends Error {
   constructor(message: string) {
     super(message);
@@ -39,6 +41,12 @@ export async function graphqlRequest<T>(
   variables?: Record<string, unknown>,
   token?: string,
 ): Promise<T> {
+  const endpoint: string | undefined = process.env.NEXT_PUBLIC_WORDPRESS_API_URL;
+  if (!endpoint) {
+    // Not a GraphQLError on purpose: lib/auth.ts turns it into the "could not reach the store" message.
+    throw new Error("NEXT_PUBLIC_WORDPRESS_API_URL is not set.");
+  }
+
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -46,10 +54,12 @@ export async function graphqlRequest<T>(
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const res = await fetch(process.env.NEXT_PUBLIC_WORDPRESS_API_URL!, {
+  const res = await fetch(endpoint, {
     method: "POST",
     headers,
     body: JSON.stringify({ query, variables }),
+    // A stuck server now fails after 15 seconds instead of loading forever.
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   const json: GraphQLResponse<T> = await res.json();

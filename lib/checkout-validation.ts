@@ -16,7 +16,7 @@ export function normalizeKuwaitPhone(value: string): string {
 }
 
 /**
- * Validates the customer block. Returns clean data when valid, or field errors when not.
+ * Validates the customer block. Email is optional for WhatsApp-first checkout.
  * Never throws, so it is safe to use on untrusted input.
  */
 export function validateCheckoutCustomer(input: unknown): {
@@ -51,13 +51,13 @@ export function validateCheckoutCustomer(input: unknown): {
   readText("deliveryNote", 500, false);
 
   const email: string = typeof src.email === "string" ? src.email.trim().toLowerCase() : "";
-  if (!EMAIL_RE.test(email) || email.length > 120) {
-    errors.email = "Enter a valid email address.";
+  if (email.length > 0 && (!EMAIL_RE.test(email) || email.length > 120)) {
+    errors.email = "Enter a valid email address or leave blank.";
   }
 
   const digits: string = typeof src.phone === "string" ? normalizeKuwaitPhone(src.phone.trim()) : "";
   if (!KUWAIT_MOBILE_RE.test(digits)) {
-    errors.phone = "Enter an 8-digit Kuwait mobile number.";
+    errors.phone = "Enter an 8-digit Kuwait mobile number (starts with 5, 6 or 9).";
   }
 
   if (Object.keys(errors).length > 0) return { data: null, errors };
@@ -66,7 +66,7 @@ export function validateCheckoutCustomer(input: unknown): {
     data: {
       firstName: clean.firstName,
       lastName: clean.lastName,
-      email,
+      email: email || undefined,
       phone: `+965${digits}`,
       governorate: clean.governorate,
       area: clean.area,

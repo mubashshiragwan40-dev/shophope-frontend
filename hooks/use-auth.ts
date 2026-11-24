@@ -1,49 +1,73 @@
 // hooks/use-auth.ts
 "use client";
-// ------------------------------------------------------------------
-// React hook that tracks the current user and loading state.
-// Re-runs on the custom AUTH_EVENT so the header updates instantly.
-// ------------------------------------------------------------------
 
-import { useState, useEffect, useCallback } from "react";
-import { getViewer, getTokens, AUTH_EVENT, User } from "@/lib/auth";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AUTH_EVENT, getTokens, getViewer, type User } from "@/lib/auth";
 
-interface AuthState {
+export interface AuthState {
   user: User | null;
   loading: boolean;
+  error: boolean;
+  retry: () => void;
   refresh: () => Promise<void>;
 }
 
 export function useAuth(): AuthState {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<boolean>(false);
+  const latest = useRef<number>(0);
 
-  const fetch = useCallback(async () => {
-    const tokens = getTokens();
-    if (!tokens) {
+  const loadSession = useCallback(async (): Promise<void> => {
+    const id: number = ++latest.current;
+    const isCurrent = (): boolean => id === latest.current;
+
+    if (!getTokens()) {
       setUser(null);
+      setError(false);
       setLoading(false);
       return;
     }
+
     try {
-      const viewer = await getViewer();
+      const viewer: User = await getViewer();
+      if (!isCurrent()) return;
       setUser(viewer);
+      setError(false);
     } catch {
-      setUser(null);
+      if (!isCurrent()) return;
+      if (getTokens()) {
+        setError(true); // tokens still stored: network or server problem, not a sign-out
+      } else {
+        setUser(null); // authedRequest already logged out an expired session
+        setError(false);
+      }
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    // Hydrate auth state from localStorage after mount.
+    // Reads localStorage after mount, so a synchronous state update here is intentional.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetch();
+    void loadSession();
+    const onChange = (): void => {
+      void loadSession();
+    };
+    window.addEventListener(AUTH_EVENT, onChange);
+    window.addEventListener("storage", onChange);
+    return () => {
+      latest.current++; // ignore responses that arrive after unmount
+      window.removeEventListener(AUTH_EVENT, onChange);
+      window.removeEventListener("storage", onChange);
+    };
+  }, [loadSession]);
 
-    const handler = () => fetch();
-    window.addEventListener(AUTH_EVENT, handler);
-    return () => window.removeEventListener(AUTH_EVENT, handler);
-  }, [fetch]);
+  const retry = useCallback((): void => {
+    setError(false);
+    setLoading(true);
+    void loadSession();
+  }, [loadSession]);
 
-  return { user, loading, refresh: fetch };
+  return { user, loading, error, retry, refresh: loadSession };
 }

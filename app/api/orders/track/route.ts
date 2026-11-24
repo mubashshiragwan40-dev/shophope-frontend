@@ -10,9 +10,6 @@ import {
   type TrackedOrder,
 } from "@/lib/orders";
 
-/* ============================================================
-   TYPES (WooCommerce REST responses, only the fields we use)
-   ============================================================ */
 interface WcMeta {
   key: string;
   value: unknown;
@@ -45,13 +42,10 @@ interface WcOrderFull {
   meta_data: WcMeta[];
 }
 
-/* ============================================================
-   CONSTANTS
-   ============================================================ */
 const ORDER_NUMBER_RE: RegExp = /^\d{1,12}$/;
 const MAX_CONTACT_LENGTH: number = 120;
 const NOT_FOUND_MESSAGE: string =
-  "We could not find an order with those details. Please check the order number and the email or mobile number you used at checkout.";
+  "We could not find an order with those details. Please check the order number and the mobile number or email you used at checkout.";
 
 const KNOWN_STATUSES: ReadonlyArray<OrderStatus> = [
   "pending",
@@ -67,17 +61,11 @@ const TRACKING_NUMBER_KEYS: ReadonlyArray<string> = ["_tracking_number", "tracki
 const CARRIER_KEYS: ReadonlyArray<string> = ["_tracking_provider", "_carrier", "carrier"];
 const TRACKING_URL_KEYS: ReadonlyArray<string> = ["_tracking_url", "tracking_url", "_tracking_link"];
 
-/* ============================================================
-   HELPERS
-   ============================================================ */
-
-/** Phone numbers are compared by their last 8 digits (Kuwait mobile length). */
 function phoneKey(value: string): string {
   const digits: string = value.replace(/\D/g, "");
   return digits.length >= 8 ? digits.slice(-8) : "";
 }
 
-/** True when the entered contact matches the billing email or the billing phone. */
 function contactMatches(contact: string, billing: { email: string; phone: string }): boolean {
   const entered: string = contact.trim();
 
@@ -110,7 +98,6 @@ function isHttpUrl(value: string | null): value is string {
   }
 }
 
-/** Reads courier details from the WooCommerce Shipment Tracking plugin, or from plain order meta. */
 function extractTracking(order: WcOrderFull): {
   trackingNumber: string | null;
   carrier: string | null;
@@ -142,7 +129,6 @@ function toStatus(raw: string): OrderStatus {
   return (KNOWN_STATUSES as ReadonlyArray<string>).includes(raw) ? (raw as OrderStatus) : "processing";
 }
 
-/** Builds the 3-step timeline. "pending" and "on-hold" count as the first step. */
 function buildTimeline(status: OrderStatus): TimelineStep[] {
   const rank: Record<string, number> = { pending: 0, "on-hold": 0, processing: 1, completed: 2 };
   const currentIndex: number = rank[status] ?? 1;
@@ -180,11 +166,24 @@ function toTrackedOrder(order: WcOrderFull): TrackedOrder {
   };
 }
 
-/* ============================================================
-   POST /api/orders/track
-   Body: { orderNumber: string, contact: string }
-   Wrong contact and unknown order return the same 404, so order numbers cannot be guessed.
-   ============================================================ */
+async function lookupOrderByNumber(orderNumber: string): Promise<WcOrderFull | null> {
+  try {
+    const direct = await wcFetch<WcOrderFull>(`/orders/${orderNumber}`);
+    if (String(direct.number) === orderNumber || String(direct.id) === orderNumber) {
+      return direct;
+    }
+  } catch (err: unknown) {
+    if (!(err instanceof WooError && err.status === 404)) {
+      throw err;
+    }
+  }
+
+  const candidates = await wcFetch<WcOrderFull[]>(
+    `/orders?search=${encodeURIComponent(orderNumber)}&per_page=10`
+  );
+  return candidates.find((o) => String(o.number) === orderNumber) ?? null;
+}
+
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     const body: unknown = await request.json().catch(() => null);
@@ -198,20 +197,14 @@ export async function POST(request: Request): Promise<NextResponse> {
     const contact: string = typeof b.contact === "string" ? b.contact.trim() : "";
 
     if (!ORDER_NUMBER_RE.test(orderNumber) || contact.length < 5 || contact.length > MAX_CONTACT_LENGTH) {
-      return NextResponse.json({ error: "Please enter a valid order number and contact." }, { status: 400 });
+      return NextResponse.json(
+        { error: "Please enter a valid order number and mobile number or email." },
+        { status: 400 }
+      );
     }
 
-    let order: WcOrderFull;
-    try {
-      order = await wcFetch<WcOrderFull>(`/orders/${orderNumber}`);
-    } catch (err: unknown) {
-      if (err instanceof WooError && err.status === 404) {
-        return NextResponse.json({ error: NOT_FOUND_MESSAGE }, { status: 404 });
-      }
-      throw err;
-    }
-
-    if (!contactMatches(contact, order.billing)) {
+    const order = await lookupOrderByNumber(orderNumber);
+    if (!order || !contactMatches(contact, order.billing)) {
       return NextResponse.json({ error: NOT_FOUND_MESSAGE }, { status: 404 });
     }
 
