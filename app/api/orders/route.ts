@@ -16,6 +16,7 @@ import {
    ============================================================ */
 interface WcProduct {
   id: number;
+  parent_id?: number;
   name: string;
   status: string;
   type: string;
@@ -162,11 +163,35 @@ function parseItems(raw: unknown): OrderLine[] {
 }
 
 async function loadProducts(lines: OrderLine[]): Promise<Map<number, WcProduct>> {
-  const ids: string = lines.map((l) => l.productId).join(",");
-  const products: WcProduct[] = await wcFetch<WcProduct[]>(
-    `/products?include=${ids}&per_page=${lines.length}`
-  );
-  const byId: Map<number, WcProduct> = new Map(products.map((p) => [p.id, p]));
+  const uniqueIds: number[] = Array.from(new Set(lines.map((l) => l.productId)));
+  const byId: Map<number, WcProduct> = new Map();
+
+  if (uniqueIds.length > 0) {
+    const batchProducts: WcProduct[] = await wcFetch<WcProduct[]>(
+      `/products?include=${uniqueIds.join(",")}&per_page=${uniqueIds.length}`
+    );
+    for (const item of batchProducts) {
+      byId.set(item.id, item);
+    }
+  }
+
+  const missingIds: number[] = uniqueIds.filter((id) => !byId.has(id));
+  if (missingIds.length > 0) {
+    await Promise.all(
+      missingIds.map(async (id) => {
+        try {
+          const fetched = await wcFetch<WcProduct>(`/products/${id}`);
+          if (fetched && typeof fetched.id === "number") {
+            byId.set(fetched.id, fetched);
+          }
+        } catch (err: unknown) {
+          if (err instanceof WooError && (err.status === 401 || err.status === 403 || err.status >= 500)) {
+            throw err;
+          }
+        }
+      })
+    );
+  }
 
   for (const line of lines) {
     const product: WcProduct | undefined = byId.get(line.productId);
@@ -177,9 +202,21 @@ async function loadProducts(lines: OrderLine[]): Promise<Map<number, WcProduct>>
         409
       );
     }
-    if (product.type !== "simple") {
+    if (product.type === "variable") {
       throw new RequestError(
-        `"${product.name}" needs options selected and cannot be ordered directly.`,
+        `"${product.name}" requires selecting an option (such as Colour or Size) before ordering.`,
+        409
+      );
+    }
+    if (product.type !== "simple" && product.type !== "variation") {
+      throw new RequestError(
+        `"${product.name}" cannot be ordered directly.`,
+        409
+      );
+    }
+    if (product.type === "variation" && (!product.parent_id || product.parent_id <= 0)) {
+      throw new RequestError(
+        `"${product.name}" is missing product configuration. Please refresh and try again.`,
         409
       );
     }
@@ -274,7 +311,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       }
     }
 
-    await loadProducts(lines);
+    const productsById = await loadProducts(lines);
 
     const eightDigits: string = normalizeKuwaitPhone(customer.phone);
     const billingEmail: string =
@@ -304,6 +341,18 @@ export async function POST(request: Request): Promise<NextResponse> {
       ...(idempotencyKey ? [{ key: "_idempotency_key", value: idempotencyKey }] : []),
     ];
 
+    const lineItems = lines.map((l) => {
+      const prod = productsById.get(l.productId);
+      if (prod && prod.type === "variation" && prod.parent_id) {
+        return {
+          product_id: prod.parent_id,
+          variation_id: prod.id,
+          quantity: l.quantity,
+        };
+      }
+      return { product_id: l.productId, quantity: l.quantity };
+    });
+
     const created: WcCreatedOrder = await wcFetch<WcCreatedOrder>("/orders", {
       method: "POST",
       body: JSON.stringify({
@@ -315,7 +364,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         billing: { ...address, email: billingEmail, phone: customer.phone },
         shipping: { ...address, phone: customer.phone },
         customer_note: customer.deliveryNote ?? "",
-        line_items: lines.map((l) => ({ product_id: l.productId, quantity: l.quantity })),
+        line_items: lineItems,
         shipping_lines: [
           {
             method_id: "flat_rate",

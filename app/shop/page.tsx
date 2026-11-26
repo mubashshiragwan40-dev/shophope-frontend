@@ -10,11 +10,19 @@ import { EXPRESS_BUY_NOW_KEY } from "@/app/product/[slug]/product-client";
 import { SHOP_OPEN_FILTERS_EVENT } from "@/components/site-header";
 import ProtectedProductImage from "@/components/protected-product-image";
 
+/* ============================================================
+   TYPES
+   ============================================================ */
 interface GraphQLCategory {
   databaseId: number;
   name: string;
   slug: string;
   parentDatabaseId: number | null;
+}
+
+interface GraphQLAttribute {
+  name: string;
+  options: string[];
 }
 
 interface GraphQLProduct {
@@ -29,10 +37,7 @@ interface GraphQLProduct {
   productCategories: { nodes: GraphQLCategory[] } | null;
   productTags?: { nodes: Array<{ name: string; slug: string }> } | null;
   attributes?: {
-    nodes: Array<{
-      name: string;
-      options: string[];
-    }>;
+    nodes: GraphQLAttribute[];
   } | null;
 }
 
@@ -72,10 +77,19 @@ interface FilterState {
   sizes: string[];
 }
 
+interface ActiveChip {
+  key: string;
+  label: string;
+  onRemove: () => void;
+}
+
 type SortKey = "default" | "price-asc" | "price-desc" | "name-asc";
 
+/* ============================================================
+   CONSTANTS
+   ============================================================ */
 const API_URL: string =
-  process.env.NEXT_PUBLIC_WORDPRESS_API_URL || "http://localhost/shophope/graphql";
+  process.env.NEXT_PUBLIC_WORDPRESS_API_URL || "https://backend.shophope.online/graphql";
 
 const PRODUCTS_QUERY: string = `
   query GetShopProducts($term: String) {
@@ -131,24 +145,10 @@ const PARENT_VISIBLE_COUNT: number = 8;
 
 const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
   { value: "default", label: "Default sorting" },
-  { value: "name-asc", label: "Sort by name" },
-  { value: "price-asc", label: "Sort by price: low to high" },
-  { value: "price-desc", label: "Sort by price: high to low" },
+  { value: "name-asc", label: "Name: A to Z" },
+  { value: "price-asc", label: "Price: Low to High" },
+  { value: "price-desc", label: "Price: High to Low" },
 ];
-
-const COLORS: string[] = [
-  "Blue",
-  "Corn Yellow",
-  "Dull Brown",
-  "Ebony Clay",
-  "Mushroom",
-  "Red",
-  "Tealish Blue",
-  "Black",
-  "White",
-  "Pink",
-];
-const SIZES: string[] = ["Free size", "S", "M", "L", "XL", "XXL"];
 
 const EMPTY_FILTERS: FilterState = {
   categoryId: null,
@@ -160,6 +160,9 @@ const EMPTY_FILTERS: FilterState = {
 
 const NO_PRODUCTS: GraphQLProduct[] = [];
 
+/* ============================================================
+   HELPERS
+   ============================================================ */
 function htmlToText(html: string): string {
   if (typeof window === "undefined") return html.replace(/<[^>]*>/g, "");
   const doc = new DOMParser().parseFromString(html, "text/html");
@@ -179,6 +182,14 @@ function getDiscountPercent(price: string | null, regularPrice: string | null): 
   const regular = parseAmount(regularPrice);
   if (current === null || regular === null || regular <= current) return null;
   return Math.round(((regular - current) / regular) * 100);
+}
+
+function formatAttributeLabel(raw: string): string {
+  const cleaned = raw.replace(/[-_]+/g, " ").trim();
+  if (cleaned.length <= 3 && cleaned === cleaned.toLowerCase()) {
+    return cleaned.toUpperCase();
+  }
+  return cleaned.replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
 function countActiveFilters(filters: FilterState): number {
@@ -250,21 +261,65 @@ function collectCategoryIds(node: CategoryNode): number[] {
   return [node.id, ...node.children.flatMap(collectCategoryIds)];
 }
 
-function productMatchesAttribute(product: GraphQLProduct, selectedValues: string[]): boolean {
-  if (selectedValues.length === 0) return true;
-  const allOptions = (product.attributes?.nodes ?? [])
-    .flatMap((attr) => attr.options ?? [])
-    .map((opt) => opt.toLowerCase().trim());
-  const titleLower = product.name.toLowerCase();
-  return selectedValues.some((val) => {
-    const needle = val.toLowerCase().trim();
-    return allOptions.includes(needle) || titleLower.includes(needle);
-  });
+function findCategoryName(tree: CategoryNode[], targetId: number | null): string | null {
+  if (targetId === null) return null;
+  for (const node of tree) {
+    if (node.id === targetId) return node.name;
+    const foundChild = findCategoryName(node.children, targetId);
+    if (foundChild) return foundChild;
+  }
+  return null;
 }
 
+function isColorAttributeName(name: string): boolean {
+  const n = name.toLowerCase();
+  return n.includes("color") || n.includes("colour");
+}
+
+function isSizeAttributeName(name: string): boolean {
+  const n = name.toLowerCase();
+  return n.includes("size");
+}
+
+function extractAttributeOptions(
+  products: GraphQLProduct[],
+  matcher: (attrName: string) => boolean
+): string[] {
+  const set = new Set<string>();
+  for (const product of products) {
+    for (const attr of product.attributes?.nodes ?? []) {
+      if (!attr?.name || !matcher(attr.name)) continue;
+      for (const opt of attr.options ?? []) {
+        const clean = opt.trim();
+        if (clean) set.add(clean);
+      }
+    }
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
+}
+
+function productMatchesAttributeGroup(
+  product: GraphQLProduct,
+  selectedValues: string[],
+  matcher: (attrName: string) => boolean
+): boolean {
+  if (selectedValues.length === 0) return true;
+  const groupOptions = (product.attributes?.nodes ?? [])
+    .filter((attr) => attr?.name && matcher(attr.name))
+    .flatMap((attr) => attr.options ?? [])
+    .map((opt) => opt.toLowerCase().trim());
+
+  if (groupOptions.length === 0) return false;
+
+  return selectedValues.some((val) => groupOptions.includes(val.toLowerCase().trim()));
+}
+
+/* ============================================================
+   ICONS
+   ============================================================ */
 function HeartIcon({ filled = false }: { filled?: boolean }): ReactNode {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8Z" />
     </svg>
   );
@@ -282,7 +337,7 @@ function FilterIcon(): ReactNode {
 
 function CloseIcon(): ReactNode {
   return (
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
       <path d="M18 6 6 18M6 6l12 12" />
     </svg>
   );
@@ -296,18 +351,23 @@ function UpArrowIcon(): ReactNode {
   );
 }
 
+/* ============================================================
+   LAYOUT COMPONENTS
+   ============================================================ */
 function PageBanner({ title }: { title: string }): ReactNode {
   return (
-    <section className="bg-[#f8f9fa] border-b border-[#f1f5f9]">
-      <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 py-7 sm:py-8 text-center">
-        <h1 className="text-2xl sm:text-4xl lg:text-[42px] font-bold tracking-tight text-[#212529]">{title}</h1>
-        <nav aria-label="Breadcrumb" className="mt-2.5 text-sm text-[#6c757d]">
+    <section className="bg-[#f8f9fa] border-b border-[#e9ecef]">
+      <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+        <nav aria-label="Breadcrumb" className="text-xs sm:text-sm text-[#6c757d] mb-1.5">
           <Link href="/" className="hover:text-[#e91e63] transition-colors">
             Home
           </Link>
           <span className="mx-2">/</span>
-          <span className="text-[#212529]">{title}</span>
+          <span className="text-[#212529] font-medium">{title}</span>
         </nav>
+        <h1 className="text-2xl sm:text-3xl lg:text-[36px] font-bold tracking-tight text-[#212529]">
+          {title}
+        </h1>
       </div>
     </section>
   );
@@ -315,8 +375,10 @@ function PageBanner({ title }: { title: string }): ReactNode {
 
 function SidebarSection({ title, children }: { title: string; children: ReactNode }): ReactNode {
   return (
-    <div className="py-5 border-b border-[#f1f5f9]">
-      <h3 className="text-[14px] font-bold uppercase tracking-wide text-[#212529] mb-3">{title}</h3>
+    <div className="py-4 border-b border-[#e9ecef] last:border-b-0">
+      <h3 className="text-[12px] font-bold uppercase tracking-wider text-[#212529] mb-3">
+        {title}
+      </h3>
       {children}
     </div>
   );
@@ -353,14 +415,18 @@ function CategoryList({
   };
 
   const itemClass = (active: boolean): string =>
-    `flex-1 min-w-0 text-left py-1.5 text-[14px] transition-colors hover:text-[#e91e63] ${
+    `flex-1 min-w-0 text-left py-1.5 text-[13.5px] transition-colors hover:text-[#e91e63] ${
       active ? "text-[#e91e63] font-semibold" : "text-[#495057]"
     }`;
 
   return (
-    <ul className="text-[14px]">
+    <ul className="text-[13.5px]">
       <li>
-        <button type="button" onClick={() => onSelect(null)} className={`${itemClass(selectedId === null)} w-full flex items-center justify-between gap-2`}>
+        <button
+          type="button"
+          onClick={() => onSelect(null)}
+          className={`${itemClass(selectedId === null)} w-full flex items-center justify-between gap-2`}
+        >
           <span>All products</span>
           <span className="text-[12px] text-[#6c757d]">{totalProducts}</span>
         </button>
@@ -399,7 +465,7 @@ function CategoryList({
             </div>
 
             {hasChildren && isExpanded && (
-              <ul className="ml-3 pl-3 border-l border-[#f1f5f9] mb-1">
+              <ul className="ml-3 pl-3 border-l border-[#e9ecef] mb-1">
                 {parent.children.map((child) => (
                   <li key={child.id}>
                     <button
@@ -423,7 +489,7 @@ function CategoryList({
           <button
             type="button"
             onClick={() => setShowAll((prev) => !prev)}
-            className="text-[13px] font-semibold text-[#e91e63] hover:text-[#c2185b] transition-colors"
+            className="text-[12.5px] font-semibold text-[#e91e63] hover:text-[#c2185b] transition-colors"
           >
             {showAll ? "See less" : `See more (${hiddenCount})`}
           </button>
@@ -436,6 +502,8 @@ function CategoryList({
 interface FiltersPanelProps {
   categoryTree: CategoryNode[];
   totalProducts: number;
+  availableColors: string[];
+  availableSizes: string[];
   value: FilterState;
   onChange: (next: FilterState) => void;
   showPriceApplyButton: boolean;
@@ -445,6 +513,8 @@ interface FiltersPanelProps {
 function FiltersPanel({
   categoryTree,
   totalProducts,
+  availableColors,
+  availableSizes,
   value,
   onChange,
   showPriceApplyButton,
@@ -454,7 +524,7 @@ function FiltersPanel({
     list.includes(item) ? list.filter((v) => v !== item) : [...list, item];
 
   return (
-    <div className="w-full">
+    <div className="w-full bg-white rounded-xl border border-[#e9ecef] p-4">
       <SidebarSection title="Categories">
         <CategoryList
           tree={categoryTree}
@@ -464,90 +534,96 @@ function FiltersPanel({
         />
       </SidebarSection>
 
-      <SidebarSection title="Filter by price">
-        <div className="flex items-center gap-2">
+      <SidebarSection title="Price (KD)">
+        <div className="grid grid-cols-2 gap-2">
           <input
             type="number"
             min={0}
+            step="any"
             inputMode="decimal"
-            placeholder="Min (KD)"
+            placeholder="Min"
             aria-label="Minimum price"
             value={value.price.min}
             onChange={(e) => onChange({ ...value, price: { ...value.price, min: e.target.value } })}
-            className="w-full h-11 px-3 border border-[#dee2e6] rounded-md text-sm focus:outline-none focus:border-[#e91e63]"
+            className="w-full h-10 px-3 border border-[#dee2e6] rounded-lg text-sm focus:outline-none focus:border-[#e91e63]"
           />
           <input
             type="number"
             min={0}
+            step="any"
             inputMode="decimal"
-            placeholder="Max (KD)"
+            placeholder="Max"
             aria-label="Maximum price"
             value={value.price.max}
             onChange={(e) => onChange({ ...value, price: { ...value.price, max: e.target.value } })}
-            className="w-full h-11 px-3 border border-[#dee2e6] rounded-md text-sm focus:outline-none focus:border-[#e91e63]"
+            className="w-full h-10 px-3 border border-[#dee2e6] rounded-lg text-sm focus:outline-none focus:border-[#e91e63]"
           />
         </div>
         {showPriceApplyButton && (
           <button
             type="button"
             onClick={onApplyPrice}
-            className="mt-3 h-10 px-5 bg-[#e91e63] hover:bg-[#c2185b] text-white text-xs font-bold uppercase tracking-wide rounded-md transition-colors"
+            className="mt-2.5 w-full h-9 bg-[#212529] hover:bg-[#e91e63] text-white text-xs font-semibold uppercase tracking-wider rounded-lg transition-colors"
           >
-            Filter
+            Apply price
           </button>
         )}
       </SidebarSection>
 
-      <SidebarSection title="Filter by color">
-        <ul className="space-y-2 text-[14px] text-[#495057]">
-          {COLORS.map((color) => (
-            <li key={color}>
-              <label className="flex items-center gap-2 cursor-pointer py-1">
-                <input
-                  type="checkbox"
-                  checked={value.colors.includes(color)}
-                  onChange={() => onChange({ ...value, colors: toggleInList(value.colors, color) })}
-                  className="w-4 h-4 accent-[#e91e63]"
-                />
-                {color}
-              </label>
-            </li>
-          ))}
-        </ul>
-      </SidebarSection>
+      {availableColors.length > 0 && (
+        <SidebarSection title="Color">
+          <ul className="space-y-1 text-[13.5px] text-[#495057] max-h-60 overflow-y-auto py-1 pr-1">
+            {availableColors.map((color) => (
+              <li key={color}>
+                <label className="flex items-center gap-2.5 cursor-pointer py-1.5 px-1.5 rounded-md hover:bg-[#f8f9fa] hover:text-[#212529]">
+                  <input
+                    type="checkbox"
+                    checked={value.colors.includes(color)}
+                    onChange={() => onChange({ ...value, colors: toggleInList(value.colors, color) })}
+                    className="w-4 h-4 shrink-0 rounded accent-[#e91e63]"
+                  />
+                  <span className="truncate">{formatAttributeLabel(color)}</span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        </SidebarSection>
+      )}
 
-      <SidebarSection title="Filter by size">
-        <ul className="space-y-2 text-[14px] text-[#495057]">
-          {SIZES.map((size) => (
-            <li key={size}>
-              <label className="flex items-center gap-2 cursor-pointer py-1">
-                <input
-                  type="checkbox"
-                  checked={value.sizes.includes(size)}
-                  onChange={() => onChange({ ...value, sizes: toggleInList(value.sizes, size) })}
-                  className="w-4 h-4 accent-[#e91e63]"
-                />
-                {size}
-              </label>
-            </li>
-          ))}
-        </ul>
-      </SidebarSection>
+      {availableSizes.length > 0 && (
+        <SidebarSection title="Size">
+          <div className="flex flex-wrap gap-1.5">
+            {availableSizes.map((size) => {
+              const active = value.sizes.includes(size);
+              return (
+                <button
+                  key={size}
+                  type="button"
+                  onClick={() => onChange({ ...value, sizes: toggleInList(value.sizes, size) })}
+                  className={`h-8 px-3 rounded-md text-xs font-semibold border transition-colors ${
+                    active
+                      ? "bg-[#e91e63] border-[#e91e63] text-white"
+                      : "bg-white border-[#dee2e6] text-[#495057] hover:border-[#e91e63] hover:text-[#e91e63]"
+                  }`}
+                >
+                  {formatAttributeLabel(size)}
+                </button>
+              );
+            })}
+          </div>
+        </SidebarSection>
+      )}
 
-      <SidebarSection title="Stock status">
-        <ul className="space-y-2 text-[14px] text-[#495057]">
-          <li>
-            <label className="flex items-center gap-2 cursor-pointer py-1">
-              <input
-                type="checkbox"
-                checked={value.onSale}
-                onChange={(e) => onChange({ ...value, onSale: e.target.checked })}
-                className="w-4 h-4 accent-[#e91e63]"
-              />
-              On sale
-            </label>
-          </li>
-        </ul>
+      <SidebarSection title="Offers & Stock">
+        <label className="flex items-center gap-2.5 cursor-pointer py-1.5 px-1.5 rounded-md hover:bg-[#f8f9fa] text-[13.5px] text-[#495057]">
+          <input
+            type="checkbox"
+            checked={value.onSale}
+            onChange={(e) => onChange({ ...value, onSale: e.target.checked })}
+            className="w-4 h-4 shrink-0 rounded accent-[#e91e63]"
+          />
+          <span>On sale only</span>
+        </label>
       </SidebarSection>
     </div>
   );
@@ -558,6 +634,8 @@ interface MobileFilterSheetProps {
   onClose: () => void;
   categoryTree: CategoryNode[];
   totalProducts: number;
+  availableColors: string[];
+  availableSizes: string[];
   applied: FilterState;
   onApply: (next: FilterState) => void;
 }
@@ -567,6 +645,8 @@ function MobileFilterSheet({
   onClose,
   categoryTree,
   totalProducts,
+  availableColors,
+  availableSizes,
   applied,
   onApply,
 }: MobileFilterSheetProps): ReactNode {
@@ -604,49 +684,53 @@ function MobileFilterSheet({
     >
       <div
         onClick={onClose}
-        className={`absolute inset-0 bg-black/50 transition-opacity duration-300 ${open ? "opacity-100" : "opacity-0"}`}
+        className={`absolute inset-0 bg-black/50 transition-opacity duration-300 ${
+          open ? "opacity-100" : "opacity-0"
+        }`}
       />
 
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Filters"
-        className={`absolute inset-x-0 bottom-0 flex flex-col max-h-[88vh] bg-white rounded-t-2xl shadow-2xl transition-transform duration-300 ease-out ${
+        className={`absolute inset-x-0 bottom-0 flex flex-col max-h-[88vh] bg-[#f8f9fa] rounded-t-2xl shadow-2xl transition-transform duration-300 ease-out ${
           open ? "translate-y-0" : "translate-y-full"
         }`}
       >
-        <div className="flex items-center justify-between px-5 h-14 border-b border-[#f1f5f9] shrink-0">
-          <h2 className="text-[17px] font-bold text-[#212529]">
+        <div className="flex items-center justify-between px-5 h-14 bg-white rounded-t-2xl border-b border-[#e9ecef] shrink-0">
+          <h2 className="text-[16px] font-bold text-[#212529]">
             Filters{draftCount > 0 ? ` (${draftCount})` : ""}
           </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close filters"
-            className="w-9 h-9 inline-flex items-center justify-center text-[#212529] hover:text-[#e91e63] transition-colors"
+            className="w-9 h-9 inline-flex items-center justify-center rounded-lg text-[#212529] hover:text-[#e91e63] transition-colors"
           >
             <CloseIcon />
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto overscroll-contain px-5">
+        <div className="flex-1 overflow-y-auto overscroll-contain p-4">
           <FiltersPanel
             categoryTree={categoryTree}
             totalProducts={totalProducts}
+            availableColors={availableColors}
+            availableSizes={availableSizes}
             value={draft}
             onChange={setDraft}
             showPriceApplyButton={false}
           />
         </div>
 
-        <div className="shrink-0 flex items-center gap-3 px-5 py-4 border-t border-[#f1f5f9] bg-white">
+        <div className="shrink-0 flex items-center gap-3 px-4 py-3.5 border-t border-[#e9ecef] bg-white">
           <button
             type="button"
             onClick={() => setDraft(EMPTY_FILTERS)}
             disabled={draftCount === 0}
-            className="h-12 px-5 border border-[#dee2e6] rounded-md text-[14px] font-semibold uppercase text-[#212529] hover:border-[#e91e63] hover:text-[#e91e63] disabled:opacity-40 transition-colors"
+            className="h-11 px-4 border border-[#dee2e6] rounded-lg text-[13px] font-semibold uppercase text-[#212529] hover:border-[#e91e63] hover:text-[#e91e63] disabled:opacity-40 transition-colors"
           >
-            Clear all
+            Clear
           </button>
           <button
             type="button"
@@ -654,9 +738,9 @@ function MobileFilterSheet({
               onApply(draft);
               onClose();
             }}
-            className="flex-1 h-12 bg-[#e91e63] hover:bg-[#c2185b] active:scale-[0.98] text-white text-[14px] font-semibold uppercase rounded-md transition-all"
+            className="flex-1 h-11 bg-[#e91e63] hover:bg-[#c2185b] active:scale-[0.98] text-white text-[13px] font-semibold uppercase rounded-lg transition-all"
           >
-            Apply
+            Show results
           </button>
         </div>
       </div>
@@ -683,7 +767,7 @@ function ShopProductCard({
   onBuyNow,
 }: ShopProductCardProps): ReactNode {
   const categoryName: string =
-    product.productCategories?.nodes?.map((n) => n.name).join(", ") || "Uncategorized";
+    product.productCategories?.nodes?.map((n) => n.name).join(" · ") || "Featured";
   const discount: number | null = getDiscountPercent(product.price, product.regularPrice);
   const priceNum: number | null = parseAmount(product.price);
   const regularNum: number | null = parseAmount(product.regularPrice);
@@ -691,14 +775,14 @@ function ShopProductCard({
   const productHref: string = `/product/${product.slug}`;
 
   return (
-    <article className="group relative flex flex-col h-full bg-white rounded-xl border border-[#e9ecef] overflow-hidden shadow-[0_2px_10px_rgba(33,37,41,0.05)] hover:shadow-[0_10px_28px_rgba(33,37,41,0.12)] transition-shadow duration-300">
+    <article className="group relative flex flex-col h-full bg-white rounded-xl border border-[#e9ecef] overflow-hidden shadow-[0_1px_4px_rgba(33,37,41,0.04)] hover:border-[#dee2e6] hover:shadow-[0_10px_24px_rgba(33,37,41,0.08)] transition-all duration-200">
       {discount !== null && (
-        <span className="absolute top-2.5 left-2.5 z-10 bg-[#e91e63] text-white text-[11px] sm:text-[12px] font-bold px-2.5 py-1 rounded-full shadow">
+        <span className="absolute top-2.5 left-2.5 z-10 bg-[#e91e63] text-white text-[11px] font-bold px-2 py-0.5 rounded-md">
           {`-${discount}%`}
         </span>
       )}
 
-      <div className="relative p-2.5 sm:p-3.5 pb-0">
+      <div className="relative p-2.5 sm:p-3 pb-0">
         <Link
           href={productHref}
           aria-label={product.name}
@@ -716,71 +800,77 @@ function ShopProductCard({
           onClick={() => onToggleWishlist(product)}
           aria-pressed={isWishlisted}
           aria-label={isWishlisted ? "Remove from wishlist" : "Add to wishlist"}
-          className={`absolute top-4 right-4 sm:top-5 sm:right-5 z-10 w-8 h-8 sm:w-9 sm:h-9 inline-flex items-center justify-center rounded-full border border-[#f1f5f9] shadow-sm transition-colors ${
-            isWishlisted ? "bg-[#e91e63] text-white border-[#e91e63]" : "bg-white text-[#212529] hover:text-[#e91e63]"
+          className={`absolute top-4 right-4 z-10 w-8 h-8 inline-flex items-center justify-center rounded-full border shadow-sm transition-colors ${
+            isWishlisted
+              ? "bg-[#e91e63] text-white border-[#e91e63]"
+              : "bg-white/95 text-[#212529] border-[#e9ecef] hover:text-[#e91e63]"
           }`}
         >
           <HeartIcon filled={isWishlisted} />
         </button>
       </div>
 
-      <div className="flex flex-col flex-1 p-3 sm:p-4 gap-1.5">
+      <div className="flex flex-col flex-1 p-3 sm:p-4 gap-1">
+        <p className="text-[11px] font-medium text-[#6c757d] truncate" title={categoryName}>
+          {categoryName}
+        </p>
+
         <Link
           href={productHref}
           title={product.name}
-          className="line-clamp-2 min-h-[38px] sm:min-h-[42px] text-[13px] sm:text-[15px] font-semibold leading-snug text-[#212529] hover:text-[#e91e63] transition-colors"
+          className="line-clamp-2 min-h-[36px] sm:min-h-[40px] text-[13px] sm:text-[14.5px] font-semibold leading-snug text-[#212529] hover:text-[#e91e63] transition-colors"
         >
           {product.name}
         </Link>
 
-        <p className="text-[11px] sm:text-[12px] text-[#6c757d] truncate" title={categoryName}>
-          {categoryName}
-        </p>
-
         {product.stockStatus && (
           <p
-            className={`text-[11px] sm:text-[12px] font-semibold ${
+            className={`text-[11px] font-medium ${
               isOutOfStock ? "text-[#dc3545]" : "text-[#198754]"
             }`}
           >
-            {isOutOfStock ? "Out of stock" : "✓ In stock"}
+            {isOutOfStock ? "Out of stock" : "In stock"}
           </p>
         )}
 
-        <div className="mt-auto pt-2 flex flex-col gap-2">
+        <div className="mt-auto pt-2.5 flex flex-col gap-2">
           <div className="flex flex-wrap items-baseline gap-1.5">
             {priceNum !== null ? (
-              <span className="text-[14px] sm:text-[16px] font-bold text-[#e91e63]">{formatKD(priceNum)}</span>
+              <span className="text-[14px] sm:text-[16px] font-bold text-[#212529]">
+                {formatKD(priceNum)}
+              </span>
             ) : (
               <span className="text-xs font-semibold text-[#6c757d]">Select options</span>
             )}
             {discount !== null && regularNum !== null && (
-              <span className="text-[11px] sm:text-[13px] text-[#6c757d] line-through">{formatKD(regularNum)}</span>
+              <span className="text-[11.5px] sm:text-[12.5px] text-[#6c757d] line-through">
+                {formatKD(regularNum)}
+              </span>
             )}
           </div>
 
           {isOutOfStock || priceNum === null ? (
             <Link
               href={productHref}
-              className="h-10 sm:h-11 w-full inline-flex items-center justify-center rounded-md bg-[#212529] hover:bg-[#343a40] text-white text-[11px] sm:text-[12px] font-bold uppercase tracking-wide transition-colors"
+              className="h-10 w-full inline-flex items-center justify-center rounded-lg bg-[#212529] hover:bg-[#343a40] text-white text-[11px] sm:text-[12px] font-semibold uppercase tracking-wide transition-colors"
             >
-              View Product
+              View product
             </Link>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 sm:gap-2">
+            <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
               <button
                 type="button"
                 onClick={() => onAdd(product)}
-                className="h-9 sm:h-10 border border-[#e91e63] bg-white hover:bg-[#fff5f8] active:scale-[0.98] text-[#e91e63] text-[11px] sm:text-[12px] font-bold uppercase rounded-md transition-all"
+                className="h-10 border border-[#212529] bg-white hover:bg-[#f8f9fa] active:scale-[0.98] text-[#212529] text-[11px] sm:text-[12px] font-semibold uppercase rounded-lg transition-all"
               >
-                Add Cart
+                Add cart
               </button>
               <button
                 type="button"
                 onClick={() => onBuyNow(product)}
-                className="h-9 sm:h-10 bg-[#e91e63] hover:bg-[#c2185b] active:scale-[0.98] text-white text-[11px] sm:text-[12px] font-bold uppercase rounded-md transition-all"
+                className="h-10 bg-[#e91e63] hover:bg-[#c2185b] active:scale-[0.98] text-white text-[11px] sm:text-[12px] font-semibold uppercase rounded-lg transition-all"
               >
-                Buy Now
+                Buy now
               </button>
             </div>
           )}
@@ -805,7 +895,7 @@ function Pagination({
   if (pageCount <= 1) return null;
 
   return (
-    <nav aria-label="Pagination" className="mt-10 flex justify-center items-center gap-2">
+    <nav aria-label="Pagination" className="mt-10 flex justify-center items-center gap-1.5 sm:gap-2">
       {Array.from({ length: pageCount }).map((_, i) => {
         const n: number = i + 1;
         const active: boolean = n === page;
@@ -815,7 +905,7 @@ function Pagination({
             type="button"
             onClick={() => onChange(n)}
             aria-current={active ? "page" : undefined}
-            className={`w-10 h-10 text-sm font-semibold rounded-md border transition-colors ${
+            className={`w-10 h-10 text-sm font-semibold rounded-lg border transition-colors ${
               active
                 ? "bg-[#e91e63] border-[#e91e63] text-white"
                 : "bg-white border-[#dee2e6] text-[#212529] hover:border-[#e91e63] hover:text-[#e91e63]"
@@ -944,6 +1034,14 @@ function ShopContent(): ReactNode {
   }, [toast]);
 
   const categoryTree: CategoryNode[] = useMemo(() => buildCategoryTree(products), [products]);
+  const availableColors: string[] = useMemo(
+    () => extractAttributeOptions(products, isColorAttributeName),
+    [products]
+  );
+  const availableSizes: string[] = useMemo(
+    () => extractAttributeOptions(products, isSizeAttributeName),
+    [products]
+  );
 
   useEffect(() => {
     if (!categorySlugParam || products.length === 0) return;
@@ -998,8 +1096,8 @@ function ShopContent(): ReactNode {
         return false;
       }
       if (filters.onSale && getDiscountPercent(p.price, p.regularPrice) === null) return false;
-      if (!productMatchesAttribute(p, filters.colors)) return false;
-      if (!productMatchesAttribute(p, filters.sizes)) return false;
+      if (!productMatchesAttributeGroup(p, filters.colors, isColorAttributeName)) return false;
+      if (!productMatchesAttributeGroup(p, filters.sizes, isSizeAttributeName)) return false;
       return true;
     });
 
@@ -1027,7 +1125,65 @@ function ShopContent(): ReactNode {
   const rangeStart: number = filtered.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1;
   const rangeEnd: number = Math.min(currentPage * PAGE_SIZE, filtered.length);
 
-  const activeFilterCount: number = countActiveFilters(filters) + (tagSlugParam ? 1 : 0);
+  const activeChips: ActiveChip[] = useMemo(() => {
+    const chips: ActiveChip[] = [];
+    const catName = findCategoryName(categoryTree, filters.categoryId);
+    if (catName) {
+      chips.push({
+        key: "category",
+        label: `Category: ${catName}`,
+        onRemove: () => {
+          setFilters((prev) => ({ ...prev, categoryId: null }));
+          if (categorySlugParam) router.push("/shop");
+        },
+      });
+    }
+    if (tagSlugParam) {
+      chips.push({
+        key: "tag",
+        label: `Tag: ${tagSlugParam}`,
+        onRemove: () => router.push("/shop"),
+      });
+    }
+    if (filters.price.min !== "" || filters.price.max !== "") {
+      const minLabel = filters.price.min !== "" ? `KD ${filters.price.min}` : "Any";
+      const maxLabel = filters.price.max !== "" ? `KD ${filters.price.max}` : "Any";
+      chips.push({
+        key: "price",
+        label: `Price: ${minLabel} – ${maxLabel}`,
+        onRemove: () => {
+          setFilters((prev) => ({ ...prev, price: { min: "", max: "" } }));
+          setDesktopPriceDraft({ min: "", max: "" });
+        },
+      });
+    }
+    if (filters.onSale) {
+      chips.push({
+        key: "sale",
+        label: "On sale",
+        onRemove: () => setFilters((prev) => ({ ...prev, onSale: false })),
+      });
+    }
+    for (const c of filters.colors) {
+      chips.push({
+        key: `color-${c}`,
+        label: `Color: ${formatAttributeLabel(c)}`,
+        onRemove: () =>
+          setFilters((prev) => ({ ...prev, colors: prev.colors.filter((item) => item !== c) })),
+      });
+    }
+    for (const s of filters.sizes) {
+      chips.push({
+        key: `size-${s}`,
+        label: `Size: ${formatAttributeLabel(s)}`,
+        onRemove: () =>
+          setFilters((prev) => ({ ...prev, sizes: prev.sizes.filter((item) => item !== s) })),
+      });
+    }
+    return chips;
+  }, [categoryTree, filters, categorySlugParam, tagSlugParam, router]);
+
+  const activeFilterCount: number = activeChips.length;
 
   const handleDesktopChange = (next: FilterState): void => {
     setDesktopPriceDraft(next.price);
@@ -1107,44 +1263,48 @@ function ShopContent(): ReactNode {
       <PageBanner title={bannerTitle} />
 
       <section className="bg-white py-6 sm:py-8">
-        <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0">
-          <div className={`grid gap-8 ${showSidebar ? "lg:grid-cols-[260px_1fr]" : "grid-cols-1"}`}>
+        <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8">
+          <div className={`grid gap-7 lg:gap-8 ${showSidebar ? "lg:grid-cols-[260px_1fr]" : "grid-cols-1"}`}>
             {showSidebar && (
               <aside className="hidden lg:block" aria-label="Product filters">
-                <FiltersPanel
-                  categoryTree={categoryTree}
-                  totalProducts={products.length}
-                  value={{ ...filters, price: desktopPriceDraft }}
-                  onChange={handleDesktopChange}
-                  showPriceApplyButton
-                  onApplyPrice={handleDesktopApplyPrice}
-                />
+                <div className="lg:sticky lg:top-24">
+                  <FiltersPanel
+                    categoryTree={categoryTree}
+                    totalProducts={products.length}
+                    availableColors={availableColors}
+                    availableSizes={availableSizes}
+                    value={{ ...filters, price: desktopPriceDraft }}
+                    onChange={handleDesktopChange}
+                    showPriceApplyButton
+                    onApplyPrice={handleDesktopApplyPrice}
+                  />
+                </div>
               </aside>
             )}
 
-            <div>
+            <div className="min-w-0">
               {isSearching && (
-                <div className="mb-5 flex flex-wrap items-center justify-between gap-3 bg-[#f8f9fa] border border-[#f1f5f9] px-4 py-3 rounded-lg">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3 bg-[#f8f9fa] border border-[#e9ecef] px-4 py-3 rounded-xl">
                   <p className="text-sm text-[#495057]">
                     Search results for{" "}
                     <span className="font-semibold text-[#212529]">&quot;{searchTerm}&quot;</span>
                   </p>
                   <Link
                     href="/shop"
-                    className="text-[13px] font-semibold uppercase text-[#e91e63] hover:text-[#c2185b] transition-colors"
+                    className="text-xs font-semibold uppercase tracking-wide text-[#e91e63] hover:text-[#c2185b] transition-colors"
                   >
                     Clear search
                   </Link>
                 </div>
               )}
 
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 mb-6 border-b border-[#f1f5f9]">
-                <div className="flex flex-wrap items-center gap-2.5 sm:gap-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 pb-4 mb-5 border-b border-[#e9ecef]">
+                <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
                   <button
                     type="button"
                     onClick={() => setSheetOpen(true)}
                     aria-haspopup="dialog"
-                    className="lg:hidden h-9 px-3.5 inline-flex items-center gap-2 border border-[#dee2e6] text-xs font-semibold uppercase rounded-md hover:border-[#e91e63] hover:text-[#e91e63] transition-colors"
+                    className="lg:hidden h-10 px-3.5 inline-flex items-center gap-2 border border-[#dee2e6] bg-white text-xs font-semibold uppercase tracking-wide rounded-lg hover:border-[#e91e63] hover:text-[#e91e63] transition-colors"
                   >
                     <FilterIcon />
                     Filters
@@ -1158,21 +1318,23 @@ function ShopContent(): ReactNode {
                   <button
                     type="button"
                     onClick={() => setShowSidebar((prev) => !prev)}
-                    className="hidden lg:inline-flex h-10 px-4 items-center border border-[#dee2e6] text-sm font-semibold uppercase rounded-md hover:border-[#e91e63] hover:text-[#e91e63] transition-colors"
+                    className="hidden lg:inline-flex h-10 px-3.5 items-center border border-[#dee2e6] bg-white text-xs font-semibold uppercase tracking-wide rounded-lg hover:border-[#e91e63] hover:text-[#e91e63] transition-colors"
                   >
-                    {showSidebar ? "Hide sidebar" : "Show sidebar"}
+                    {showSidebar ? "Hide filters" : "Show filters"}
                   </button>
 
                   <p className="text-xs sm:text-sm text-[#6c757d]">
-                    {loading ? "Loading products..." : `Showing ${rangeStart}–${rangeEnd} of ${filtered.length} results`}
+                    {loading
+                      ? "Loading products..."
+                      : `Showing ${rangeStart}–${rangeEnd} of ${filtered.length} products`}
                   </p>
                 </div>
 
                 <select
-                  aria-label="Shop order"
+                  aria-label="Sort products"
                   value={sort}
                   onChange={(e) => setSort(e.target.value as SortKey)}
-                  className="h-10 px-3 border border-[#dee2e6] rounded-md text-xs sm:text-sm bg-white focus:outline-none focus:border-[#e91e63]"
+                  className="h-10 px-3 border border-[#dee2e6] rounded-lg text-xs sm:text-sm bg-white text-[#212529] focus:outline-none focus:border-[#e91e63]"
                 >
                   {SORT_OPTIONS.map((opt) => (
                     <option key={opt.value} value={opt.value}>
@@ -1182,13 +1344,25 @@ function ShopContent(): ReactNode {
                 </select>
               </div>
 
-              {activeFilterCount > 0 && (
-                <div className="-mt-2 mb-5 flex items-center justify-between text-xs sm:text-sm">
-                  <span className="text-[#6c757d]">{`${activeFilterCount} filter${activeFilterCount > 1 ? "s" : ""} applied`}</span>
+              {activeChips.length > 0 && (
+                <div className="mb-5 flex flex-wrap items-center gap-2">
+                  {activeChips.map((chip) => (
+                    <button
+                      key={chip.key}
+                      type="button"
+                      onClick={chip.onRemove}
+                      className="h-8 px-3 inline-flex items-center gap-1.5 rounded-full bg-[#f8f9fa] border border-[#dee2e6] text-xs font-medium text-[#212529] hover:border-[#e91e63] hover:text-[#e91e63] transition-colors"
+                    >
+                      <span>{chip.label}</span>
+                      <span aria-hidden="true" className="text-[#6c757d]">
+                        ×
+                      </span>
+                    </button>
+                  ))}
                   <button
                     type="button"
                     onClick={handleClearAll}
-                    className="font-semibold text-[#e91e63] hover:text-[#c2185b] transition-colors"
+                    className="h-8 px-2.5 text-xs font-semibold text-[#e91e63] hover:text-[#c2185b] transition-colors"
                   >
                     Clear all
                   </button>
@@ -1196,42 +1370,50 @@ function ShopContent(): ReactNode {
               )}
 
               {loading && (
-                <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-6" aria-busy="true">
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3 sm:gap-5" aria-busy="true">
                   {Array.from({ length: 6 }).map((_, i) => (
-                    <div key={i} className="h-[360px] sm:h-[440px] rounded-xl bg-[#f8f9fa] border border-[#f1f5f9] animate-pulse" />
+                    <div
+                      key={i}
+                      className="h-[340px] sm:h-[410px] rounded-xl bg-[#f8f9fa] border border-[#e9ecef] animate-pulse"
+                    />
                   ))}
                 </div>
               )}
 
               {!loading && error && (
-                <div role="alert" className="max-w-xl mx-auto text-center border border-[#f1f5f9] p-8 bg-[#f8f9fa] rounded-xl">
+                <div
+                  role="alert"
+                  className="max-w-xl mx-auto text-center border border-[#e9ecef] p-8 bg-[#f8f9fa] rounded-xl"
+                >
                   <p className="font-bold text-[#212529]">We couldn&apos;t load products.</p>
                   <p className="mt-1 text-sm text-[#6c757d]">{error}</p>
                   <button
                     type="button"
                     onClick={() => setReloadKey((k) => k + 1)}
-                    className="mt-5 bg-[#e91e63] hover:bg-[#c2185b] text-white text-xs font-bold uppercase tracking-widest px-6 py-3 rounded-full transition-colors"
+                    className="mt-5 bg-[#e91e63] hover:bg-[#c2185b] text-white text-xs font-semibold uppercase tracking-wider px-6 py-3 rounded-lg transition-colors"
                   >
-                    RETRY
+                    Retry
                   </button>
                 </div>
               )}
 
               {!loading && !error && filtered.length === 0 && (
-                <div className="text-center py-12 bg-[#f8f9fa] border border-[#f1f5f9] rounded-xl">
-                  <p className="text-[#6c757d]">No products match these filters.</p>
+                <div className="text-center py-12 px-4 bg-[#f8f9fa] border border-[#e9ecef] rounded-xl">
+                  <p className="text-sm text-[#495057] font-medium">
+                    No products match your selected filters.
+                  </p>
                   <button
                     type="button"
                     onClick={handleClearAll}
-                    className="mt-4 h-11 px-6 bg-[#e91e63] hover:bg-[#c2185b] text-white text-[13px] font-semibold uppercase rounded-md transition-colors"
+                    className="mt-4 h-10 px-5 bg-[#e91e63] hover:bg-[#c2185b] text-white text-xs font-semibold uppercase tracking-wide rounded-lg transition-colors"
                   >
-                    Show all products
+                    Reset filters
                   </button>
                 </div>
               )}
 
               {!loading && !error && pageItems.length > 0 && (
-                <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-6">
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3 sm:gap-5">
                   {pageItems.map((product) => (
                     <ShopProductCard
                       key={product.id}
@@ -1256,6 +1438,8 @@ function ShopContent(): ReactNode {
         onClose={() => setSheetOpen(false)}
         categoryTree={categoryTree}
         totalProducts={products.length}
+        availableColors={availableColors}
+        availableSizes={availableSizes}
         applied={filters}
         onApply={handleMobileApply}
       />
@@ -1273,7 +1457,7 @@ function ShopContent(): ReactNode {
 
       <div
         aria-live="polite"
-        className={`fixed bottom-20 md:bottom-6 left-4 sm:left-auto sm:right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-5 py-3 rounded-lg shadow-xl flex items-center gap-2 transition-all duration-300 ${
+        className={`fixed bottom-20 md:bottom-6 left-4 sm:left-auto sm:right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-4 py-3 rounded-lg shadow-xl flex items-center gap-2.5 transition-all duration-300 ${
           toast ? "translate-y-0 opacity-100" : "translate-y-5 opacity-0 pointer-events-none"
         }`}
       >
