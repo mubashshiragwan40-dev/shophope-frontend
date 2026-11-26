@@ -1,16 +1,32 @@
 // app/product/[slug]/product-client.tsx
 "use client";
 
+
+export const EXPRESS_BUY_NOW_KEY: string = "shophope-express-buy-now";
 import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
-import { addToCart, formatKD, type CartItem } from "@/lib/cart";
+import { useParams } from "next/navigation";
+import { addToCart } from "@/lib/cart";
 import { WISHLIST_EVENT, readWishlist, toggleWishlist } from "@/lib/wishlist";
-import ProtectedProductImage from "@/components/protected-product-image";
 
 /* ============================================================
    TYPES
    ============================================================ */
+interface VariationAttribute {
+  name: string;
+  value: string;
+}
+
+interface GraphQLVariation {
+  id: string;
+  databaseId: number;
+  name: string;
+  price: string | null;
+  regularPrice: string | null;
+  image: { sourceUrl: string } | null;
+  attributes: { nodes: VariationAttribute[] } | null;
+}
+
 interface GraphQLProduct {
   id: string;
   databaseId: number;
@@ -18,11 +34,12 @@ interface GraphQLProduct {
   slug: string;
   description: string | null;
   shortDescription: string | null;
-  price: string;
-  regularPrice: string | null;
+  price?: string | null;
+  regularPrice?: string | null;
   image: { sourceUrl: string } | null;
   productCategories: { nodes: Array<{ name: string; slug: string }> } | null;
   productTags: { nodes: Array<{ name: string; slug: string }> } | null;
+  variations?: { nodes: GraphQLVariation[] } | null;
 }
 
 interface ProductResponse {
@@ -45,9 +62,7 @@ interface InfoItem {
    CONSTANTS
    ============================================================ */
 const API_URL: string =
-  process.env.NEXT_PUBLIC_WORDPRESS_API_URL || "http://localhost/shophope/graphql";
-
-export const EXPRESS_BUY_NOW_KEY: string = "shophope-express-buy-now";
+  process.env.NEXT_PUBLIC_WORDPRESS_API_URL || "https://backend.shophope.online/graphql";
 
 const PRODUCT_QUERY: string = `
   query GetProduct($slug: ID!) {
@@ -65,6 +80,24 @@ const PRODUCT_QUERY: string = `
       ... on VariableProduct {
         price
         regularPrice
+        variations(first: 50) {
+          nodes {
+            id
+            databaseId
+            name
+            price
+            regularPrice
+            image {
+              sourceUrl
+            }
+            attributes {
+              nodes {
+                name
+                value
+              }
+            }
+          }
+        }
       }
       image {
         sourceUrl
@@ -116,19 +149,19 @@ const RELATED_QUERY: string = `
 `;
 
 const SHIPPING_POINTS: string[] = [
-  "Fast delivery across all 6 Kuwait Governorates within 24–48 hours.",
-  "Cash on Delivery (COD) available on all orders across Kuwait.",
-  "Easy 7-day exchange and return support via WhatsApp.",
-  "Order tracking is available anytime on our Track Order page.",
+  "The product will be shipped within 2-3 working days and delivered within 4-5 working days from the day of dispatch.",
+  "We dispatch your shipment within 24 hours of you making a request to ship.",
+  "Your order will reach you safe and sound within 3-6 days.",
+  "Tracking is available for all products, so you can follow your delivery from dispatch to arrival.",
 ];
 
 /* ============================================================
    HELPERS
    ============================================================ */
 function htmlToText(html: string): string {
-  if (typeof window === "undefined") return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  if (typeof window === "undefined") return html.replace(/<[^>]*>/g, "");
   const doc = new DOMParser().parseFromString(html, "text/html");
-  return (doc.body.textContent ?? "").trim();
+  return doc.body.textContent ?? "";
 }
 
 function parseAmount(html: string | null | undefined): number | null {
@@ -139,7 +172,10 @@ function parseAmount(html: string | null | undefined): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-function getDiscountPercent(price: string | null, regularPrice: string | null): number | null {
+function getDiscountPercent(
+  price: string | null | undefined,
+  regularPrice: string | null | undefined
+): number | null {
   const current = parseAmount(price);
   const regular = parseAmount(regularPrice);
   if (current === null || regular === null || regular <= current) return null;
@@ -148,7 +184,7 @@ function getDiscountPercent(price: string | null, regularPrice: string | null): 
 
 function stripHtml(html: string | null | undefined): string {
   if (!html) return "";
-  return htmlToText(html);
+  return htmlToText(html).trim();
 }
 
 /* ============================================================
@@ -156,7 +192,17 @@ function stripHtml(html: string | null | undefined): string {
    ============================================================ */
 function HeartIcon({ filled = false }: { filled?: boolean }): ReactNode {
   return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill={filled ? "currentColor" : "none"}
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
       <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8Z" />
     </svg>
   );
@@ -174,6 +220,16 @@ function ProductGallery({
   src: string | null;
   discount: number | null;
 }): ReactNode {
+  const [imgFailed, setImgFailed] = useState<boolean>(false);
+  const [lastSrc, setLastSrc] = useState<string | null>(src);
+
+  if (src !== lastSrc) {
+    setLastSrc(src);
+    setImgFailed(false);
+  }
+
+  const showImage: boolean = Boolean(src) && !imgFailed;
+
   return (
     <div className="relative w-full aspect-square bg-[#f8f9fa] border border-[#f1f5f9] overflow-hidden">
       {discount !== null && (
@@ -182,12 +238,37 @@ function ProductGallery({
         </span>
       )}
 
-      <ProtectedProductImage
-        src={src}
-        alt={name}
-        loading="eager"
-        imgClassName="w-full h-full object-contain p-6"
-      />
+      {showImage ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={src ?? undefined}
+          alt={name}
+          onError={() => setImgFailed(true)}
+          className="w-full h-full object-contain p-6"
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center">
+          <svg
+            viewBox="0 0 200 150"
+            className="max-h-[160px] w-auto"
+            role="img"
+            aria-label="Product image placeholder"
+          >
+            <rect
+              x="62"
+              y="40"
+              width="76"
+              height="76"
+              rx="14"
+              fill="#ffffff"
+              stroke="#212529"
+              strokeWidth="5"
+            />
+            <rect x="76" y="22" width="48" height="20" rx="6" fill="#e91e63" />
+            <circle cx="100" cy="80" r="16" fill="#fde4ec" />
+          </svg>
+        </div>
+      )}
     </div>
   );
 }
@@ -257,10 +338,17 @@ function ShareButtons({ title }: { title: string }): ReactNode {
   const encodedTitle: string = encodeURIComponent(title);
 
   const shareLinks: Array<{ label: string; href: string }> = [
-    { label: "WhatsApp", href: `https://wa.me/?text=${encodeURIComponent(`${title} ${url}`)}` },
     { label: "Facebook", href: `https://www.facebook.com/sharer/sharer.php?u=${encodedUrl}` },
+    {
+      label: "WhatsApp",
+      href: `https://wa.me/?text=${encodeURIComponent(`${title} ${url}`)}`,
+    },
     { label: "X", href: `https://twitter.com/intent/tweet?url=${encodedUrl}&text=${encodedTitle}` },
-    { label: "Pinterest", href: `https://pinterest.com/pin/create/button/?url=${encodedUrl}&description=${encodedTitle}` },
+    {
+      label: "Pinterest",
+      href: `https://pinterest.com/pin/create/button/?url=${encodedUrl}&description=${encodedTitle}`,
+    },
+    { label: "Email", href: `mailto:?subject=${encodedTitle}&body=${encodedUrl}` },
   ];
 
   const handleCopy = async (): Promise<void> => {
@@ -302,10 +390,10 @@ function ShareButtons({ title }: { title: string }): ReactNode {
    RELATED PRODUCT CARD
    ============================================================ */
 function RelatedCard({ product }: { product: GraphQLProduct }): ReactNode {
+  const [imgFailed, setImgFailed] = useState<boolean>(false);
   const discount: number | null = getDiscountPercent(product.price, product.regularPrice);
+  const showImage: boolean = Boolean(product.image?.sourceUrl) && !imgFailed;
   const href: string = `/product/${product.slug}`;
-  const priceNum: number | null = parseAmount(product.price);
-  const regularNum: number | null = parseAmount(product.regularPrice);
 
   return (
     <article className="group relative flex flex-col h-full bg-white border border-[#f1f5f9] shadow-[0_2px_12px_rgba(33,37,41,0.06)] hover:shadow-[0_10px_30px_rgba(33,37,41,0.12)] transition-shadow duration-300">
@@ -316,12 +404,43 @@ function RelatedCard({ product }: { product: GraphQLProduct }): ReactNode {
       )}
 
       <div className="p-3 pb-0">
-        <Link href={href} aria-label={product.name} className="block w-full aspect-square overflow-hidden bg-[#f8f9fa]">
-          <ProtectedProductImage
-            src={product.image?.sourceUrl}
-            alt={product.name}
-            imgClassName="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-          />
+        <Link
+          href={href}
+          aria-label={product.name}
+          className="block w-full aspect-square overflow-hidden bg-[#f8f9fa]"
+        >
+          {showImage ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={product.image?.sourceUrl}
+              alt={product.name}
+              loading="lazy"
+              onError={() => setImgFailed(true)}
+              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center">
+              <svg
+                viewBox="0 0 200 150"
+                className="max-h-[120px] w-auto"
+                role="img"
+                aria-label="Product image placeholder"
+              >
+                <rect
+                  x="62"
+                  y="40"
+                  width="76"
+                  height="76"
+                  rx="14"
+                  fill="#ffffff"
+                  stroke="#212529"
+                  strokeWidth="5"
+                />
+                <rect x="76" y="22" width="48" height="20" rx="6" fill="#e91e63" />
+                <circle cx="100" cy="80" r="16" fill="#fde4ec" />
+              </svg>
+            </div>
+          )}
         </Link>
       </div>
 
@@ -335,11 +454,17 @@ function RelatedCard({ product }: { product: GraphQLProduct }): ReactNode {
         </Link>
 
         <div className="mt-auto pt-3 flex flex-wrap items-baseline gap-2">
-          {priceNum !== null && (
-            <span className="text-[16px] font-bold text-[#e91e63]">{formatKD(priceNum)}</span>
+          {product.price && (
+            <span
+              className="text-[16px] font-bold text-[#e91e63]"
+              dangerouslySetInnerHTML={{ __html: product.price }}
+            />
           )}
-          {discount !== null && regularNum !== null && (
-            <span className="text-[14px] text-[#6c757d] line-through">{formatKD(regularNum)}</span>
+          {discount !== null && product.regularPrice && (
+            <span
+              className="text-[14px] text-[#6c757d] line-through"
+              dangerouslySetInnerHTML={{ __html: product.regularPrice }}
+            />
           )}
         </div>
 
@@ -358,7 +483,6 @@ function RelatedCard({ product }: { product: GraphQLProduct }): ReactNode {
    PAGE
    ============================================================ */
 export default function ProductClient(): ReactNode {
-  const router = useRouter();
   const params = useParams<{ slug: string }>();
   const slug: string = typeof params?.slug === "string" ? params.slug : "";
 
@@ -368,6 +492,7 @@ export default function ProductClient(): ReactNode {
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState<number>(0);
 
+  const [selectedAttrs, setSelectedAttrs] = useState<Record<string, string>>({});
   const [quantity, setQuantity] = useState<number>(1);
   const [isWishlisted, setIsWishlisted] = useState<boolean>(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -411,11 +536,14 @@ export default function ProductClient(): ReactNode {
         if (!productRes.ok) throw new Error(`GraphQL request failed with status ${productRes.status}`);
 
         const productJson: ProductResponse = await productRes.json();
-        if (productJson.errors && productJson.errors.length > 0) throw new Error(productJson.errors[0].message);
+        if (productJson.errors && productJson.errors.length > 0) {
+          throw new Error(productJson.errors[0].message);
+        }
 
         const found: GraphQLProduct | null = productJson.data?.product ?? null;
         if (!found) throw new Error("Product not found.");
         setProduct(found);
+        setSelectedAttrs({});
         setQuantity(1);
 
         if (relatedRes.ok) {
@@ -441,24 +569,63 @@ export default function ProductClient(): ReactNode {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const discount: number | null = useMemo(
-    () => (product ? getDiscountPercent(product.price, product.regularPrice) : null),
+  const variations: GraphQLVariation[] = useMemo(
+    () => product?.variations?.nodes ?? [],
     [product]
   );
 
-  const priceNum: number | null = useMemo(
-    () => (product ? parseAmount(product.price) : null),
-    [product]
-  );
-  const regularNum: number | null = useMemo(
-    () => (product ? parseAmount(product.regularPrice) : null),
-    [product]
+  const attributeGroups: Array<{ name: string; options: string[] }> = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const v of variations) {
+      for (const attr of v.attributes?.nodes ?? []) {
+        if (!attr.name || !attr.value) continue;
+        if (!map.has(attr.name)) map.set(attr.name, new Set<string>());
+        map.get(attr.name)?.add(attr.value);
+      }
+    }
+    return Array.from(map.entries()).map(([name, set]) => ({
+      name,
+      options: Array.from(set),
+    }));
+  }, [variations]);
+
+  const matchedVariation: GraphQLVariation | null = useMemo(() => {
+    if (variations.length === 0) return null;
+    if (attributeGroups.length === 0) return variations[0] ?? null;
+
+    const exact = variations.find((v) =>
+      attributeGroups.every((group) => {
+        const chosen = selectedAttrs[group.name];
+        if (!chosen) return false;
+        const foundAttr = (v.attributes?.nodes ?? []).find((a) => a.name === group.name);
+        return foundAttr?.value === chosen;
+      })
+    );
+    return exact ?? null;
+  }, [variations, attributeGroups, selectedAttrs]);
+
+  const activePrice: string | null =
+    matchedVariation?.price || product?.price || null;
+  const activeRegularPrice: string | null =
+    matchedVariation?.regularPrice || product?.regularPrice || null;
+  const activeImage: string | null =
+    matchedVariation?.image?.sourceUrl || product?.image?.sourceUrl || null;
+  const activeCartId: string = matchedVariation
+    ? String(matchedVariation.databaseId)
+    : String(product?.databaseId ?? "");
+  const activeCartName: string = matchedVariation
+    ? `${product?.name ?? ""} — ${matchedVariation.name}`
+    : (product?.name ?? "");
+
+  const discount: number | null = useMemo(
+    () => getDiscountPercent(activePrice, activeRegularPrice),
+    [activePrice, activeRegularPrice]
   );
 
   const categories: Array<{ name: string; slug: string }> = product?.productCategories?.nodes ?? [];
   const tags: Array<{ name: string; slug: string }> = product?.productTags?.nodes ?? [];
-  const shortDescriptionText: string = stripHtml(product?.shortDescription);
-  const descriptionText: string = stripHtml(product?.description) || shortDescriptionText;
+  const descriptionText: string =
+    stripHtml(product?.description) || stripHtml(product?.shortDescription);
 
   const infoItems: InfoItem[] = [
     {
@@ -468,62 +635,51 @@ export default function ProductClient(): ReactNode {
     },
     {
       id: "shipping",
-      title: "Shipping & Delivery (Kuwait)",
+      title: "Shipping & Delivery",
       content: (
-        <div className="space-y-4">
-          <p>
-            We deliver safely across all Kuwait Governorates with Cash on Delivery (COD) and real-time order tracking.
-          </p>
-          <ul className="list-disc pl-5 space-y-2">
-            {SHIPPING_POINTS.map((point) => (
-              <li key={point}>{point}</li>
-            ))}
-          </ul>
+        <div className="space-y-5">
+          <div>
+            <h3 className="text-[14px] font-bold uppercase text-[#212529] mb-2">
+              Fast and safe delivery
+            </h3>
+            <p>
+              We deliver your product with safety and security in mind. You can track your
+              product&apos;s progress through the delivery process.
+            </p>
+          </div>
+          <div>
+            <h3 className="text-[14px] font-bold uppercase text-[#212529] mb-2">
+              Our shipping system
+            </h3>
+            <ul className="list-disc pl-5 space-y-2">
+              {SHIPPING_POINTS.map((point) => (
+                <li key={point}>{point}</li>
+              ))}
+            </ul>
+          </div>
         </div>
       ),
     },
   ];
 
   const handleAddToCart = (): void => {
-    if (!product || priceNum === null) return;
+    if (!product) return;
+    if (attributeGroups.length > 0 && !matchedVariation) {
+      setToast("Please select all options first");
+      return;
+    }
+    const price: number = parseAmount(activePrice) ?? 0;
     addToCart(
       {
-        id: String(product.databaseId),
+        id: activeCartId,
         slug: product.slug,
-        name: product.name,
-        image: product.image?.sourceUrl ?? null,
-        price: priceNum,
+        name: activeCartName,
+        image: activeImage,
+        price,
       },
       quantity
     );
-    setToast(`Added: ${product.name} (x${quantity})`);
-  };
-
-  const handleBuyNow = (): void => {
-    if (!product || priceNum === null) return;
-    const expressItem: CartItem = {
-      id: String(product.databaseId),
-      slug: product.slug,
-      name: product.name,
-      image: product.image?.sourceUrl ?? null,
-      price: priceNum,
-      quantity,
-    };
-    try {
-      sessionStorage.setItem(EXPRESS_BUY_NOW_KEY, JSON.stringify(expressItem));
-    } catch {
-      addToCart(
-        {
-          id: expressItem.id,
-          slug: expressItem.slug,
-          name: expressItem.name,
-          image: expressItem.image,
-          price: expressItem.price,
-        },
-        quantity
-      );
-    }
-    router.push("/checkout?mode=buy_now");
+    setToast(`Added: ${activeCartName} (x${quantity})`);
   };
 
   const handleToggleWishlist = (): void => {
@@ -532,21 +688,25 @@ export default function ProductClient(): ReactNode {
       id: product.id,
       slug: product.slug,
       name: product.name,
-      image: product.image?.sourceUrl ?? null,
-      price: priceNum ?? 0,
+      image: activeImage,
+      price: parseAmount(activePrice) ?? 0,
     });
     setIsWishlisted(added);
     setToast(added ? "Added to wishlist" : "Removed from wishlist");
   };
 
   return (
-    <div className="pb-20 md:pb-0">
+    <>
       <section className="bg-[#f8f9fa] border-b border-[#f1f5f9]">
         <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 py-4">
           <nav aria-label="Breadcrumb" className="text-sm text-[#6c757d]">
-            <Link href="/" className="hover:text-[#e91e63] transition-colors">Home</Link>
+            <Link href="/" className="hover:text-[#e91e63] transition-colors">
+              Home
+            </Link>
             <span className="mx-2">/</span>
-            <Link href="/shop" className="hover:text-[#e91e63] transition-colors">Shop</Link>
+            <Link href="/shop" className="hover:text-[#e91e63] transition-colors">
+              Shop
+            </Link>
             {categories[0] && (
               <>
                 <span className="mx-2">/</span>
@@ -578,7 +738,10 @@ export default function ProductClient(): ReactNode {
 
       {!loading && error && (
         <section className="bg-white py-16">
-          <div role="alert" className="max-w-xl mx-auto text-center border border-[#f1f5f9] p-8 bg-[#f8f9fa]">
+          <div
+            role="alert"
+            className="max-w-xl mx-auto text-center border border-[#f1f5f9] p-8 bg-[#f8f9fa]"
+          >
             <p className="font-bold text-[#212529]">We couldn&apos;t load this product.</p>
             <p className="mt-1 text-sm text-[#6c757d]">{error}</p>
             <button
@@ -596,101 +759,150 @@ export default function ProductClient(): ReactNode {
         <>
           <section className="bg-white py-8 lg:py-12">
             <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 grid gap-10 lg:grid-cols-2">
-              <ProductGallery name={product.name} src={product.image?.sourceUrl ?? null} discount={discount} />
+              <ProductGallery name={product.name} src={activeImage} discount={discount} />
 
               <div className="flex flex-col">
-                <h1 className="text-[28px] sm:text-[32px] leading-tight font-semibold text-[#212529]">{product.name}</h1>
+                <h1 className="text-[28px] sm:text-[32px] leading-tight font-semibold text-[#212529]">
+                  {product.name}
+                </h1>
 
                 <div className="mt-4 flex flex-wrap items-baseline gap-3">
-                  {priceNum !== null && (
-                    <span className="text-[24px] font-bold text-[#e91e63]">{formatKD(priceNum)}</span>
+                  {activePrice && (
+                    <span
+                      className="text-[22px] font-bold text-[#e91e63]"
+                      dangerouslySetInnerHTML={{ __html: activePrice }}
+                    />
                   )}
-                  {discount !== null && regularNum !== null && (
-                    <span className="text-[16px] text-[#6c757d] line-through">{formatKD(regularNum)}</span>
+                  {discount !== null && activeRegularPrice && (
+                    <span
+                      className="text-[16px] text-[#6c757d] line-through"
+                      dangerouslySetInnerHTML={{ __html: activeRegularPrice }}
+                    />
                   )}
                 </div>
 
-                {shortDescriptionText && (
-                  <p className="mt-5 text-[15px] leading-relaxed text-[#495057] whitespace-pre-line">
-                    {shortDescriptionText}
-                  </p>
+                {product.shortDescription && (
+                  <div
+                    className="mt-5 text-[15px] leading-relaxed text-[#495057]"
+                    dangerouslySetInnerHTML={{ __html: product.shortDescription }}
+                  />
                 )}
 
-                <div className="mt-8 space-y-3">
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center h-[52px] border border-[#dee2e6] rounded-md w-fit">
-                      <button
-                        type="button"
-                        aria-label="Decrease quantity"
-                        onClick={() => setQuantity((q) => Math.max(1, q - 1))}
-                        className="w-12 h-full text-lg hover:text-[#e91e63] transition-colors"
-                      >
-                        −
-                      </button>
-                      <input
-                        type="number"
-                        min={1}
-                        max={50}
-                        value={quantity}
-                        aria-label="Quantity"
-                        onChange={(e) => setQuantity(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}
-                        className="w-12 h-full text-center text-[15px] font-semibold focus:outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                      />
-                      <button
-                        type="button"
-                        aria-label="Increase quantity"
-                        onClick={() => setQuantity((q) => Math.min(50, q + 1))}
-                        className="w-12 h-full text-lg hover:text-[#e91e63] transition-colors"
-                      >
-                        +
-                      </button>
-                    </div>
+                {/* Variation selectors */}
+                {attributeGroups.length > 0 && (
+                  <div className="mt-6 space-y-4">
+                    {attributeGroups.map((group) => {
+                      const currentVal = selectedAttrs[group.name] ?? "";
+                      return (
+                        <div key={group.name}>
+                          <div className="flex items-center justify-between mb-2">
+                            <label
+                              htmlFor={`attr-${group.name}`}
+                              className="text-[14px] font-semibold text-[#212529]"
+                            >
+                              {group.name}
+                            </label>
+                            {currentVal && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSelectedAttrs((prev) => {
+                                    const next = { ...prev };
+                                    delete next[group.name];
+                                    return next;
+                                  })
+                                }
+                                className="text-xs text-[#6c757d] hover:text-[#e91e63] underline"
+                              >
+                                Clear
+                              </button>
+                            )}
+                          </div>
+                          <select
+                            id={`attr-${group.name}`}
+                            value={currentVal}
+                            onChange={(e) =>
+                              setSelectedAttrs((prev) => ({
+                                ...prev,
+                                [group.name]: e.target.value,
+                              }))
+                            }
+                            className="w-full h-11 px-3 border border-[#dee2e6] rounded-md text-sm bg-white text-[#212529] focus:outline-none focus:border-[#e91e63]"
+                          >
+                            <option value="">Choose an option</option>
+                            {group.options.map((opt) => (
+                              <option key={opt} value={opt}>
+                                {opt}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
 
+                {/* Quantity + actions */}
+                <div className="mt-8 flex flex-col sm:flex-row gap-3">
+                  <div className="flex items-center h-[52px] border border-[#dee2e6] rounded-md w-fit">
                     <button
                       type="button"
-                      onClick={handleAddToCart}
-                      disabled={priceNum === null}
-                      className="flex-1 h-[52px] px-6 border-2 border-[#e91e63] bg-white hover:bg-[#fff5f8] disabled:border-[#dee2e6] disabled:text-[#6c757d] active:scale-[0.98] text-[#e91e63] text-[14px] font-bold uppercase rounded-md transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63]"
+                      aria-label="Decrease quantity"
+                      onClick={() => setQuantity((q) => Math.max(1, q - 1))}
+                      className="w-12 h-full text-lg hover:text-[#e91e63] transition-colors"
                     >
-                      ADD TO CART
+                      −
                     </button>
-
+                    <input
+                      type="number"
+                      min={1}
+                      value={quantity}
+                      aria-label="Quantity"
+                      onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
+                      className="w-12 h-full text-center text-[15px] font-semibold focus:outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                    />
                     <button
                       type="button"
-                      onClick={handleToggleWishlist}
-                      aria-pressed={isWishlisted}
-                      aria-label={isWishlisted ? "Remove from wishlist" : "Add to wishlist"}
-                      className={`w-[52px] h-[52px] shrink-0 inline-flex items-center justify-center border rounded-md transition-colors ${
-                        isWishlisted
-                          ? "bg-[#e91e63] border-[#e91e63] text-white"
-                          : "bg-white border-[#dee2e6] text-[#212529] hover:border-[#e91e63] hover:text-[#e91e63]"
-                      }`}
+                      aria-label="Increase quantity"
+                      onClick={() => setQuantity((q) => q + 1)}
+                      className="w-12 h-full text-lg hover:text-[#e91e63] transition-colors"
                     >
-                      <HeartIcon filled={isWishlisted} />
+                      +
                     </button>
                   </div>
 
                   <button
                     type="button"
-                    onClick={handleBuyNow}
-                    disabled={priceNum === null}
-                    className="w-full h-[54px] px-8 bg-[#e91e63] hover:bg-[#c2185b] disabled:bg-[#f1f5f9] disabled:text-[#6c757d] active:scale-[0.99] text-white text-[15px] font-bold uppercase tracking-wide rounded-md shadow-sm transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63] focus-visible:ring-offset-2"
+                    onClick={handleAddToCart}
+                    disabled={!activePrice}
+                    className="flex-1 h-[52px] px-8 bg-[#e91e63] hover:bg-[#c2185b] disabled:bg-[#f1f5f9] disabled:text-[#6c757d] active:scale-[0.98] text-white text-[15px] font-semibold uppercase rounded-md transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63] focus-visible:ring-offset-2"
                   >
-                    BUY NOW — EXPRESS CHECKOUT
+                    ADD TO CART
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleToggleWishlist}
+                    aria-pressed={isWishlisted}
+                    aria-label={isWishlisted ? "Remove from wishlist" : "Add to wishlist"}
+                    className={`w-[52px] h-[52px] shrink-0 inline-flex items-center justify-center border rounded-md transition-colors ${
+                      isWishlisted
+                        ? "bg-[#e91e63] border-[#e91e63] text-white"
+                        : "bg-white border-[#dee2e6] text-[#212529] hover:border-[#e91e63] hover:text-[#e91e63]"
+                    }`}
+                  >
+                    <HeartIcon filled={isWishlisted} />
                   </button>
                 </div>
 
-                <div className="mt-5 grid grid-cols-3 gap-2 rounded-md border border-[#f1f5f9] bg-[#f8f9fa] p-3 text-center text-[12px] font-medium text-[#212529]">
-                  <div>Cash on Delivery (KD)</div>
-                  <div>Fast Kuwait Delivery</div>
-                  <div>Easy 7-Day Returns</div>
-                </div>
-
+                {/* Meta */}
                 <div className="mt-8 pt-6 border-t border-[#f1f5f9] space-y-4 text-[14px]">
                   {categories.length > 0 && (
                     <p>
                       <span className="font-semibold text-[#212529]">Categories: </span>
-                      <span className="text-[#6c757d]">{categories.map((c) => c.name).join(" , ")}</span>
+                      <span className="text-[#6c757d]">
+                        {categories.map((c) => c.name).join(" , ")}
+                      </span>
                     </p>
                   )}
 
@@ -722,7 +934,9 @@ export default function ProductClient(): ReactNode {
           {related.length > 0 && (
             <section className="bg-[#f8f9fa] py-12">
               <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0">
-                <h2 className="text-center text-3xl sm:text-4xl font-bold text-[#212529] mb-8">Related products</h2>
+                <h2 className="text-center text-3xl sm:text-4xl font-bold text-[#212529] mb-8">
+                  Related products
+                </h2>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                   {related.map((p) => (
                     <RelatedCard key={p.id} product={p} />
@@ -731,45 +945,18 @@ export default function ProductClient(): ReactNode {
               </div>
             </section>
           )}
-
-          <div className="fixed inset-x-0 bottom-0 z-40 flex items-center justify-between gap-2 border-t border-[#dee2e6] bg-white/95 px-4 py-2.5 backdrop-blur md:hidden">
-            <div className="min-w-0">
-              <p className="text-[11px] text-[#6c757d]">Total ({quantity}x)</p>
-              <p className="text-[15px] font-bold text-[#e91e63]">
-                {priceNum !== null ? formatKD(priceNum * quantity) : "—"}
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleAddToCart}
-                disabled={priceNum === null}
-                className="h-[44px] px-3.5 border border-[#e91e63] text-[#e91e63] text-[12px] font-bold uppercase rounded-md disabled:opacity-50"
-              >
-                Add Cart
-              </button>
-              <button
-                type="button"
-                onClick={handleBuyNow}
-                disabled={priceNum === null}
-                className="h-[44px] px-4 bg-[#e91e63] hover:bg-[#c2185b] text-white text-[12px] font-bold uppercase rounded-md disabled:opacity-50"
-              >
-                Buy Now
-              </button>
-            </div>
-          </div>
         </>
       )}
 
       <div
         aria-live="polite"
-        className={`fixed bottom-20 md:bottom-6 right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-5 py-3 rounded-lg shadow-xl flex items-center gap-2 transition-all duration-300 ${
+        className={`fixed bottom-6 right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-5 py-3 rounded-lg shadow-xl flex items-center gap-2 transition-all duration-300 ${
           toast ? "translate-y-0 opacity-100" : "translate-y-5 opacity-0 pointer-events-none"
         }`}
       >
         <span className="w-2 h-2 rounded-full bg-[#e91e63] shrink-0" />
         <span className="line-clamp-1">{toast ?? ""}</span>
       </div>
-    </div>
+    </>
   );
 }
