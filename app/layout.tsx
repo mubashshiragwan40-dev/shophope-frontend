@@ -3,6 +3,7 @@ import { Suspense, type ReactNode } from "react";
 import type { Metadata } from "next";
 import SiteHeader from "@/components/site-header";
 import SiteFooter from "@/components/site-footer";
+import MetaPixel from "@/components/meta-pixel";
 import "./globals.css";
 
 const SITE_URL: string = "https://shophope.online";
@@ -124,6 +125,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(ORGANIZATION_SCHEMA) }}
         />
+
+        <Suspense fallback={null}>
+          <MetaPixel />
+        </Suspense>
 
         <Suspense fallback={<div className="h-[90px] bg-white" aria-hidden="true" />}>
           <SiteHeader />

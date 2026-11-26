@@ -3,11 +3,19 @@
 
 export const EXPRESS_BUY_NOW_KEY: string = "shophope-express-buy-now";
 
-import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { addToCart, formatKD, type CartItem } from "@/lib/cart";
 import { WISHLIST_EVENT, readWishlist, toggleWishlist } from "@/lib/wishlist";
+import { trackMetaEvent } from "@/components/meta-pixel";
 import ProtectedProductImage from "@/components/protected-product-image";
 
 /* ============================================================
@@ -446,6 +454,7 @@ export default function ProductClient(): ReactNode {
   const [isWishlisted, setIsWishlisted] = useState<boolean>(false);
   const [descExpanded, setDescExpanded] = useState<boolean>(false);
   const [toast, setToast] = useState<string | null>(null);
+  const trackedViewIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!product) return;
@@ -457,6 +466,24 @@ export default function ProductClient(): ReactNode {
       window.removeEventListener(WISHLIST_EVENT, sync);
       window.removeEventListener("storage", sync);
     };
+  }, [product]);
+
+  useEffect(() => {
+    if (!product) return;
+    if (trackedViewIdRef.current === product.databaseId) return;
+    trackedViewIdRef.current = product.databaseId;
+
+    const initialPrice = parseAmount(product.price) ?? 0;
+    const categoryName = product.productCategories?.nodes?.[0]?.name;
+
+    trackMetaEvent("ViewContent", {
+      content_ids: [String(product.databaseId)],
+      content_name: product.name,
+      content_type: "product",
+      content_category: categoryName,
+      value: initialPrice,
+      currency: "KWD",
+    });
   }, [product]);
 
   useEffect(() => {
@@ -610,16 +637,24 @@ export default function ProductClient(): ReactNode {
       setToast("Please select all options first");
       return;
     }
+    const unitPrice = numericPrice ?? 0;
     addToCart(
       {
         id: activeCartId,
         slug: product.slug,
         name: activeCartName,
         image: activeImage,
-        price: numericPrice ?? 0,
+        price: unitPrice,
       },
       quantity
     );
+    trackMetaEvent("AddToCart", {
+      content_ids: [activeCartId],
+      content_name: activeCartName,
+      content_type: "product",
+      value: Number((unitPrice * quantity).toFixed(3)),
+      currency: "KWD",
+    });
     setToast(`Added ${quantity} × ${activeCartName}`);
   };
 
@@ -651,6 +686,14 @@ export default function ProductClient(): ReactNode {
         quantity
       );
     }
+    trackMetaEvent("InitiateCheckout", {
+      content_ids: [activeCartId],
+      content_name: activeCartName,
+      content_type: "product",
+      value: Number((numericPrice * quantity).toFixed(3)),
+      currency: "KWD",
+      num_items: quantity,
+    });
     router.push("/checkout?mode=buy_now");
   };
 
