@@ -668,9 +668,9 @@ export default function ProductClient(): ReactNode {
   };
 
   return (
-    <>
+    <div className="pb-24 lg:pb-0">
       <section className="bg-[#f8f9fa] border-b border-[#e9ecef]">
-        <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 py-3">
+        <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 py-3.5">
           <nav aria-label="Breadcrumb" className="text-xs sm:text-sm text-[#6c757d] truncate">
             <Link href="/" className="hover:text-[#e91e63] transition-colors">
               Home
@@ -729,7 +729,7 @@ export default function ProductClient(): ReactNode {
 
       {!loading && !error && product && (
         <>
-          <section className="bg-white py-5 sm:py-8 lg:py-12 pb-32 lg:pb-12">
+          <section className="bg-white py-5 sm:py-8 lg:py-12">
             <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 grid gap-6 lg:gap-12 lg:grid-cols-2 items-start">
               <div className="lg:sticky lg:top-24">
                 <ProductGallery name={product.name} src={activeImage} discount={discount} />
@@ -761,7 +761,6 @@ export default function ProductClient(): ReactNode {
                   )}
                 </div>
 
-                {/* Wrapped / collapsible short description on mobile */}
                 {shortDescText && (
                   <div className="mt-3.5 text-xs sm:text-sm leading-relaxed text-[#495057]">
                     <p className={descExpanded ? "" : "line-clamp-3 sm:line-clamp-none"}>
@@ -779,7 +778,6 @@ export default function ProductClient(): ReactNode {
                   </div>
                 )}
 
-                {/* Variation selectors */}
                 {attributeGroups.length > 0 && (
                   <div className="mt-5 pt-4 border-t border-[#e9ecef] space-y-4">
                     {attributeGroups.map((group) => {
@@ -839,7 +837,6 @@ export default function ProductClient(): ReactNode {
                   </div>
                 )}
 
-                {/* Quantity + Add to Cart + Wishlist on ONE row, Buy Now below */}
                 <div className="mt-6 pt-4 border-t border-[#e9ecef] space-y-2.5">
                   <div className="flex items-center gap-2 sm:gap-3">
                     <div className="flex items-center h-11 border border-[#dee2e6] rounded-lg bg-white shrink-0">
@@ -904,7 +901,6 @@ export default function ProductClient(): ReactNode {
                   )}
                 </div>
 
-                {/* Meta */}
                 <div className="mt-6 pt-4 border-t border-[#e9ecef] space-y-3 text-xs sm:text-sm">
                   {tags.length > 0 && (
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -931,32 +927,6 @@ export default function ProductClient(): ReactNode {
             </div>
           </section>
 
-          {/* Mobile sticky action bar positioned cleanly above bottom navigation */}
-          {numericPrice !== null && (
-            <div className="lg:hidden fixed inset-x-0 bottom-[60px] z-40 bg-white/95 backdrop-blur border-t border-[#e9ecef] px-4 py-2 flex items-center justify-between gap-2.5 shadow-[0_-4px_12px_rgba(33,37,41,0.06)]">
-              <div className="min-w-0">
-                <p className="text-[11px] text-[#6c757d] truncate">{product.name}</p>
-                <p className="text-sm font-bold text-[#212529]">{formatKD(numericPrice)}</p>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={handleAddToCart}
-                  className="h-9 px-3 border border-[#212529] bg-white text-[#212529] text-[11px] font-semibold uppercase rounded-lg whitespace-nowrap"
-                >
-                  Add cart
-                </button>
-                <button
-                  type="button"
-                  onClick={handleBuyNow}
-                  className="h-9 px-3.5 bg-[#e91e63] text-white text-[11px] font-semibold uppercase rounded-lg whitespace-nowrap"
-                >
-                  Buy now
-                </button>
-              </div>
-            </div>
-          )}
-
           {related.length > 0 && (
             <section className="bg-[#f8f9fa] border-t border-[#e9ecef] py-10 sm:py-12">
               <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8">
@@ -974,15 +944,44 @@ export default function ProductClient(): ReactNode {
         </>
       )}
 
+      {/* Strictly docked mobile bottom sticky action bar */}
+      {!loading && !error && product && numericPrice !== null && (
+        <div
+          style={{ position: "fixed", bottom: 0, left: 0, width: "100%", margin: 0, zIndex: 9999 }}
+          className="lg:hidden bg-[#ffffff] border-t border-[#dee2e6] shadow-[0_-4px_16px_rgba(33,37,41,0.1)] px-4 py-2.5 flex items-center justify-between gap-2.5"
+        >
+          <div className="min-w-0">
+            <p className="text-[11px] text-[#6c757d] truncate">{product.name}</p>
+            <p className="text-sm font-bold text-[#212529]">{formatKD(numericPrice)}</p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleAddToCart}
+              className="h-10 px-3.5 border border-[#212529] bg-[#ffffff] text-[#212529] text-[11px] font-semibold uppercase rounded-lg whitespace-nowrap"
+            >
+              Add cart
+            </button>
+            <button
+              type="button"
+              onClick={handleBuyNow}
+              className="h-10 px-4 bg-[#e91e63] text-[#ffffff] text-[11px] font-semibold uppercase rounded-lg whitespace-nowrap"
+            >
+              Buy now
+            </button>
+          </div>
+        </div>
+      )}
+
       <div
         aria-live="polite"
-        className={`fixed bottom-32 lg:bottom-6 right-4 sm:right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-4 py-3 rounded-lg shadow-xl flex items-center gap-2.5 transition-all duration-300 ${
+        className={`fixed bottom-24 lg:bottom-6 right-4 sm:right-6 z-[10000] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-4 py-3 rounded-lg shadow-xl flex items-center gap-2.5 transition-all duration-300 ${
           toast ? "translate-y-0 opacity-100" : "translate-y-5 opacity-0 pointer-events-none"
         }`}
       >
         <span className="w-2 h-2 rounded-full bg-[#e91e63] shrink-0" />
         <span className="line-clamp-1">{toast ?? ""}</span>
       </div>
-    </>
+    </div>
   );
 }
