@@ -241,7 +241,7 @@ function ChevronIcon({ direction }: { direction: "left" | "right" | "up" }): Rea
 }
 
 /* ============================================================
-   HERO CAROUSEL
+   HERO CAROUSEL (Zero-crop responsive banner)
    ============================================================ */
 function HeroCarousel(): ReactNode {
   const [index, setIndex] = useState<number>(0);
@@ -270,7 +270,7 @@ function HeroCarousel(): ReactNode {
   if (slides.length === 0) {
     return (
       <section
-        className="w-full h-[220px] sm:h-[340px] lg:h-[460px] bg-[#f8f9fa] border-b border-[#e9ecef]"
+        className="w-full aspect-[16/9] sm:aspect-[1920/650] bg-[#f8f9fa] border-b border-[#e9ecef]"
         aria-hidden="true"
       />
     );
@@ -278,24 +278,24 @@ function HeroCarousel(): ReactNode {
 
   return (
     <section
-      className="relative w-full overflow-hidden bg-[#162447] h-[220px] sm:h-[340px] lg:h-[460px]"
+      className="relative w-full overflow-hidden bg-white border-b border-[#e9ecef]"
       aria-roledescription="carousel"
       aria-label="Promotions"
     >
       <div
-        className="flex h-full transition-transform duration-700 ease-in-out"
+        className="flex transition-transform duration-700 ease-in-out"
         style={{ transform: `translateX(-${activeIndex * 100}%)` }}
       >
         {slides.map((slide) => (
-          <div key={slide.id} className="relative min-w-full h-full">
-            <picture className="w-full h-full block">
+          <div key={slide.id} className="relative min-w-full">
+            <picture className="w-full block">
               <source media="(max-width: 639px)" srcSet={slide.mobileSrc} />
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={slide.desktopSrc}
                 alt={slide.alt}
                 onError={() => markFailed(slide.id)}
-                className="w-full h-full object-cover object-center select-none"
+                className="w-full h-auto max-h-[520px] object-contain sm:object-cover object-center block mx-auto select-none"
                 draggable={false}
               />
             </picture>
@@ -326,7 +326,7 @@ function HeroCarousel(): ReactNode {
             <ChevronIcon direction="right" />
           </button>
 
-          <div className="absolute z-20 bottom-3.5 left-1/2 -translate-x-1/2 flex gap-2">
+          <div className="absolute z-20 bottom-3 left-1/2 -translate-x-1/2 flex gap-2 bg-black/25 backdrop-blur-xs px-2.5 py-1.5 rounded-full">
             {slides.map((slide, i) => (
               <button
                 key={slide.id}
@@ -335,7 +335,7 @@ function HeroCarousel(): ReactNode {
                 aria-current={i === activeIndex}
                 onClick={() => goTo(i)}
                 className={`h-2 rounded-full transition-all duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63] ${
-                  i === activeIndex ? "w-6 bg-[#e91e63]" : "w-2 bg-white/80 hover:bg-white"
+                  i === activeIndex ? "w-6 bg-[#e91e63]" : "w-2 bg-white/90 hover:bg-white"
                 }`}
               />
             ))}
@@ -357,7 +357,7 @@ function HotList(): ReactNode {
           {HOT_CARDS.map((card) => (
             <div
               key={card.id}
-              className="relative overflow-hidden rounded-xl min-h-[195px] sm:h-[225px] w-full border border-[#e9ecef] shadow-[0_1px_4px_rgba(33,37,41,0.04)]"
+              className="relative overflow-hidden rounded-xl min-h-[190px] sm:h-[225px] w-full border border-[#e9ecef] shadow-[0_1px_4px_rgba(33,37,41,0.04)]"
               style={{ backgroundColor: card.bg }}
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -385,7 +385,7 @@ function HotList(): ReactNode {
                 </h2>
                 <Link
                   href={card.path}
-                  className="mt-4 inline-flex items-center justify-center h-9 px-4 bg-[#212529] hover:bg-[#e91e63] text-white text-[11px] font-semibold uppercase tracking-wider rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63]"
+                  className="mt-4 inline-flex items-center justify-center h-9 px-4 bg-[#212529] hover:bg-[#e91e63] text-white text-[11px] font-semibold uppercase tracking-wider rounded-lg transition-colors whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63]"
                 >
                   Explore
                 </Link>
@@ -499,7 +499,7 @@ function ProductCard({
           {isOutOfStock || priceNum === null ? (
             <Link
               href={productHref}
-              className="h-10 w-full inline-flex items-center justify-center rounded-lg bg-[#212529] hover:bg-[#343a40] text-white text-[11px] sm:text-[12px] font-semibold uppercase tracking-wide transition-colors"
+              className="h-9 sm:h-10 w-full inline-flex items-center justify-center rounded-lg bg-[#212529] hover:bg-[#343a40] text-white text-[11px] sm:text-[12px] font-semibold uppercase tracking-wide transition-colors whitespace-nowrap"
             >
               View product
             </Link>
@@ -508,14 +508,14 @@ function ProductCard({
               <button
                 type="button"
                 onClick={() => onAdd(product)}
-                className="h-10 border border-[#212529] bg-white hover:bg-[#f8f9fa] active:scale-[0.98] text-[#212529] text-[11px] sm:text-[12px] font-semibold uppercase rounded-lg transition-all"
+                className="h-9 sm:h-10 px-1.5 border border-[#212529] bg-white hover:bg-[#f8f9fa] active:scale-[0.98] text-[#212529] text-[10.5px] sm:text-[12px] font-semibold uppercase rounded-lg transition-all whitespace-nowrap"
               >
                 Add cart
               </button>
               <button
                 type="button"
                 onClick={() => onBuyNow(product)}
-                className="h-10 bg-[#e91e63] hover:bg-[#c2185b] active:scale-[0.98] text-white text-[11px] sm:text-[12px] font-semibold uppercase rounded-lg transition-all"
+                className="h-9 sm:h-10 px-1.5 bg-[#e91e63] hover:bg-[#c2185b] active:scale-[0.98] text-white text-[10.5px] sm:text-[12px] font-semibold uppercase rounded-lg transition-all whitespace-nowrap"
               >
                 Buy now
               </button>
@@ -595,7 +595,7 @@ function FeaturedProducts({
 
           <Link
             href="/shop"
-            className="inline-flex h-10 px-4 items-center justify-center rounded-lg border border-[#dee2e6] bg-white hover:border-[#e91e63] text-[#212529] hover:text-[#e91e63] text-xs font-semibold uppercase tracking-wide transition-colors w-fit"
+            className="inline-flex h-10 px-4 items-center justify-center rounded-lg border border-[#dee2e6] bg-white hover:border-[#e91e63] text-[#212529] hover:text-[#e91e63] text-xs font-semibold uppercase tracking-wide transition-colors w-fit whitespace-nowrap"
           >
             View all products
           </Link>
@@ -616,7 +616,7 @@ function FeaturedProducts({
                   role="tab"
                   aria-selected={active}
                   onClick={() => setSelectedCategory(cat)}
-                  className={`h-9 shrink-0 px-4 rounded-full text-xs font-semibold transition-colors ${
+                  className={`h-9 shrink-0 px-4 rounded-full text-xs font-semibold transition-colors whitespace-nowrap ${
                     active
                       ? "bg-[#212529] text-white"
                       : "bg-[#f8f9fa] text-[#495057] border border-[#e9ecef] hover:border-[#e91e63] hover:text-[#e91e63]"
@@ -692,7 +692,7 @@ function FeaturedProducts({
 }
 
 /* ============================================================
-   TRENDING PROMO TILES
+   TRENDING PROMO TILES (Zero-crop promo cards)
    ============================================================ */
 function TrendingSection(): ReactNode {
   return (
@@ -721,13 +721,13 @@ function TrendingSection(): ReactNode {
               key={tile.id}
               href={tile.path}
               aria-label={tile.title}
-              className="group block w-full aspect-[4/3] overflow-hidden rounded-xl bg-white border border-[#e9ecef] shadow-[0_1px_4px_rgba(33,37,41,0.04)] hover:shadow-[0_10px_24px_rgba(33,37,41,0.08)] transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63]"
+              className="group block w-full overflow-hidden rounded-xl bg-white border border-[#e9ecef] shadow-[0_1px_4px_rgba(33,37,41,0.04)] hover:shadow-[0_10px_24px_rgba(33,37,41,0.08)] transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63]"
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={tile.src}
                 alt={tile.title}
-                className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                className="w-full h-auto block object-contain transition-transform duration-500 group-hover:scale-[1.03]"
               />
             </Link>
           ))}
@@ -738,7 +738,7 @@ function TrendingSection(): ReactNode {
 }
 
 /* ============================================================
-   VIDEO SECTION
+   VIDEO SECTION (Centered text & single-line CTA button)
    ============================================================ */
 function VideoSection(): ReactNode {
   return (
@@ -775,16 +775,16 @@ function VideoSection(): ReactNode {
                 />
               </div>
 
-              <div className="p-3 sm:p-4 flex flex-col items-start gap-2.5">
+              <div className="p-3 sm:p-4 flex flex-col items-center text-center gap-2.5">
                 <h3 className="w-full text-xs sm:text-sm font-semibold text-[#212529] truncate">
                   {tile.title}
                 </h3>
 
                 <Link
                   href={tile.path}
-                  className="inline-flex items-center justify-center h-9 px-4 bg-[#212529] hover:bg-[#e91e63] text-white text-[11px] font-semibold uppercase tracking-wide rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63]"
+                  className="w-full inline-flex items-center justify-center h-9 px-3 bg-[#212529] hover:bg-[#e91e63] text-white text-[11px] font-semibold uppercase tracking-wide rounded-lg transition-colors whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63]"
                 >
-                  Shop collection
+                  Shop now
                 </Link>
               </div>
             </div>

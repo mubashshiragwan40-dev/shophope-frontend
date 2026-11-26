@@ -239,7 +239,7 @@ function ProductGallery({
       <ProtectedProductImage
         src={src}
         alt={name}
-        imgClassName="w-full h-full object-contain p-4 sm:p-7"
+        imgClassName="w-full h-full object-contain p-3 sm:p-6"
       />
     </div>
   );
@@ -252,7 +252,7 @@ function InfoAccordion({ items }: { items: InfoItem[] }): ReactNode {
   const [openId, setOpenId] = useState<string | null>(items[0]?.id ?? null);
 
   return (
-    <div className="mt-8 border-t border-[#e9ecef]">
+    <div className="mt-7 border-t border-[#e9ecef]">
       {items.map((item) => {
         const isOpen: boolean = openId === item.id;
         return (
@@ -418,7 +418,7 @@ function RelatedCard({ product }: { product: GraphQLProduct }): ReactNode {
 
         <Link
           href={href}
-          className="mt-2 h-10 inline-flex items-center justify-center bg-[#212529] hover:bg-[#e91e63] text-white text-xs font-semibold uppercase tracking-wide rounded-lg transition-colors"
+          className="mt-2 h-10 inline-flex items-center justify-center bg-[#212529] hover:bg-[#e91e63] text-white text-xs font-semibold uppercase tracking-wide rounded-lg transition-colors whitespace-nowrap"
         >
           View product
         </Link>
@@ -444,6 +444,7 @@ export default function ProductClient(): ReactNode {
   const [selectedAttrs, setSelectedAttrs] = useState<Record<string, string>>({});
   const [quantity, setQuantity] = useState<number>(1);
   const [isWishlisted, setIsWishlisted] = useState<boolean>(false);
+  const [descExpanded, setDescExpanded] = useState<boolean>(false);
   const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
@@ -494,6 +495,7 @@ export default function ProductClient(): ReactNode {
         setProduct(found);
         setSelectedAttrs({});
         setQuantity(1);
+        setDescExpanded(false);
 
         if (relatedRes.ok) {
           const relatedJson: ProductsResponse = await relatedRes.json();
@@ -574,8 +576,8 @@ export default function ProductClient(): ReactNode {
 
   const categories: Array<{ name: string; slug: string }> = product?.productCategories?.nodes ?? [];
   const tags: Array<{ name: string; slug: string }> = product?.productTags?.nodes ?? [];
-  const descriptionText: string =
-    stripHtml(product?.description) || stripHtml(product?.shortDescription);
+  const shortDescText: string = stripHtml(product?.shortDescription);
+  const descriptionText: string = stripHtml(product?.description) || shortDescText;
 
   const missingOption: boolean = attributeGroups.length > 0 && !matchedVariation;
 
@@ -668,7 +670,7 @@ export default function ProductClient(): ReactNode {
   return (
     <>
       <section className="bg-[#f8f9fa] border-b border-[#e9ecef]">
-        <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 py-3.5">
+        <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 py-3">
           <nav aria-label="Breadcrumb" className="text-xs sm:text-sm text-[#6c757d] truncate">
             <Link href="/" className="hover:text-[#e91e63] transition-colors">
               Home
@@ -727,53 +729,64 @@ export default function ProductClient(): ReactNode {
 
       {!loading && !error && product && (
         <>
-          <section className="bg-white py-6 sm:py-8 lg:py-12 pb-24 lg:pb-12">
-            <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 grid gap-8 lg:gap-12 lg:grid-cols-2 items-start">
+          <section className="bg-white py-5 sm:py-8 lg:py-12 pb-32 lg:pb-12">
+            <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 grid gap-6 lg:gap-12 lg:grid-cols-2 items-start">
               <div className="lg:sticky lg:top-24">
                 <ProductGallery name={product.name} src={activeImage} discount={discount} />
               </div>
 
               <div className="flex flex-col min-w-0">
                 {categories.length > 0 && (
-                  <p className="text-xs font-semibold uppercase tracking-wider text-[#6c757d] mb-1.5">
+                  <p className="text-[11px] sm:text-xs font-bold uppercase tracking-wider text-[#6c757d] mb-1">
                     {categories.map((c) => c.name).join(" · ")}
                   </p>
                 )}
 
-                <h1 className="text-2xl sm:text-[32px] leading-tight font-bold text-[#212529]">
+                <h1 className="text-xl sm:text-[30px] leading-snug font-bold text-[#212529]">
                   {product.name}
                 </h1>
 
-                <div className="mt-4 flex flex-wrap items-baseline gap-2.5">
+                <div className="mt-3 flex flex-wrap items-baseline gap-2.5">
                   {numericPrice !== null ? (
-                    <span className="text-2xl font-bold text-[#212529]">
+                    <span className="text-xl sm:text-2xl font-bold text-[#212529]">
                       {formatKD(numericPrice)}
                     </span>
                   ) : (
                     <span className="text-sm font-semibold text-[#6c757d]">Select options</span>
                   )}
                   {discount !== null && numericRegularPrice !== null && (
-                    <span className="text-sm text-[#6c757d] line-through">
+                    <span className="text-xs sm:text-sm text-[#6c757d] line-through">
                       {formatKD(numericRegularPrice)}
                     </span>
                   )}
                 </div>
 
-                {product.shortDescription && (
-                  <div
-                    className="mt-4 text-sm leading-relaxed text-[#495057]"
-                    dangerouslySetInnerHTML={{ __html: product.shortDescription }}
-                  />
+                {/* Wrapped / collapsible short description on mobile */}
+                {shortDescText && (
+                  <div className="mt-3.5 text-xs sm:text-sm leading-relaxed text-[#495057]">
+                    <p className={descExpanded ? "" : "line-clamp-3 sm:line-clamp-none"}>
+                      {shortDescText}
+                    </p>
+                    {shortDescText.length > 130 && (
+                      <button
+                        type="button"
+                        onClick={() => setDescExpanded((prev) => !prev)}
+                        className="sm:hidden mt-1 text-xs font-semibold text-[#e91e63] hover:text-[#c2185b]"
+                      >
+                        {descExpanded ? "Show less" : "Read more"}
+                      </button>
+                    )}
+                  </div>
                 )}
 
                 {/* Variation selectors */}
                 {attributeGroups.length > 0 && (
-                  <div className="mt-6 pt-5 border-t border-[#e9ecef] space-y-5">
+                  <div className="mt-5 pt-4 border-t border-[#e9ecef] space-y-4">
                     {attributeGroups.map((group) => {
                       const currentVal = selectedAttrs[group.name] ?? "";
                       return (
                         <div key={group.name}>
-                          <div className="flex items-center justify-between mb-2.5">
+                          <div className="flex items-center justify-between mb-2">
                             <span className="text-xs font-bold uppercase tracking-wider text-[#212529]">
                               {formatOptionLabel(group.name)}
                               {currentVal ? `: ${formatOptionLabel(currentVal)}` : ""}
@@ -809,7 +822,7 @@ export default function ProductClient(): ReactNode {
                                     }))
                                   }
                                   aria-pressed={isSelected}
-                                  className={`h-10 px-4 rounded-lg text-xs sm:text-sm font-semibold border transition-colors ${
+                                  className={`h-9 sm:h-10 px-3.5 sm:px-4 rounded-lg text-xs sm:text-sm font-semibold border transition-colors ${
                                     isSelected
                                       ? "bg-[#212529] border-[#212529] text-white"
                                       : "bg-white border-[#dee2e6] text-[#212529] hover:border-[#e91e63] hover:text-[#e91e63]"
@@ -826,15 +839,15 @@ export default function ProductClient(): ReactNode {
                   </div>
                 )}
 
-                {/* Quantity + primary actions */}
-                <div className="mt-7 pt-5 border-t border-[#e9ecef] space-y-3">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <div className="flex items-center h-11 border border-[#dee2e6] rounded-lg bg-white">
+                {/* Quantity + Add to Cart + Wishlist on ONE row, Buy Now below */}
+                <div className="mt-6 pt-4 border-t border-[#e9ecef] space-y-2.5">
+                  <div className="flex items-center gap-2 sm:gap-3">
+                    <div className="flex items-center h-11 border border-[#dee2e6] rounded-lg bg-white shrink-0">
                       <button
                         type="button"
                         aria-label="Decrease quantity"
                         onClick={() => setQuantity((q) => Math.max(1, q - 1))}
-                        className="w-10 h-full text-base font-semibold hover:text-[#e91e63] transition-colors"
+                        className="w-9 sm:w-10 h-full text-base font-semibold hover:text-[#e91e63] transition-colors"
                       >
                         −
                       </button>
@@ -844,13 +857,13 @@ export default function ProductClient(): ReactNode {
                         value={quantity}
                         aria-label="Quantity"
                         onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
-                        className="w-11 h-full text-center text-sm font-semibold focus:outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                        className="w-9 sm:w-11 h-full text-center text-sm font-semibold focus:outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                       />
                       <button
                         type="button"
                         aria-label="Increase quantity"
                         onClick={() => setQuantity((q) => q + 1)}
-                        className="w-10 h-full text-base font-semibold hover:text-[#e91e63] transition-colors"
+                        className="w-9 sm:w-10 h-full text-base font-semibold hover:text-[#e91e63] transition-colors"
                       >
                         +
                       </button>
@@ -860,7 +873,7 @@ export default function ProductClient(): ReactNode {
                       type="button"
                       onClick={handleAddToCart}
                       disabled={numericPrice === null}
-                      className="flex-1 min-w-[140px] h-11 px-5 border border-[#212529] bg-white hover:bg-[#f8f9fa] disabled:opacity-45 text-[#212529] text-xs sm:text-sm font-semibold uppercase tracking-wide rounded-lg transition-colors"
+                      className="flex-1 min-w-0 h-11 px-3 sm:px-5 border border-[#212529] bg-white hover:bg-[#f8f9fa] disabled:opacity-45 text-[#212529] text-xs sm:text-sm font-semibold uppercase tracking-wide rounded-lg transition-colors whitespace-nowrap"
                     >
                       Add to cart
                     </button>
@@ -884,7 +897,7 @@ export default function ProductClient(): ReactNode {
                     <button
                       type="button"
                       onClick={handleBuyNow}
-                      className="w-full h-12 bg-[#e91e63] hover:bg-[#c2185b] active:scale-[0.99] text-white text-xs sm:text-sm font-semibold uppercase tracking-wider rounded-lg transition-all"
+                      className="w-full h-11 sm:h-12 bg-[#e91e63] hover:bg-[#c2185b] active:scale-[0.99] text-white text-xs sm:text-sm font-semibold uppercase tracking-wider rounded-lg transition-all whitespace-nowrap"
                     >
                       Buy now
                     </button>
@@ -892,15 +905,15 @@ export default function ProductClient(): ReactNode {
                 </div>
 
                 {/* Meta */}
-                <div className="mt-7 pt-5 border-t border-[#e9ecef] space-y-3 text-xs sm:text-sm">
+                <div className="mt-6 pt-4 border-t border-[#e9ecef] space-y-3 text-xs sm:text-sm">
                   {tags.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span className="font-semibold text-[#212529] mr-1">Tags:</span>
                       {tags.map((tag) => (
                         <Link
                           key={tag.slug}
                           href={`/shop?tag=${tag.slug}`}
-                          className="h-7 px-3 inline-flex items-center bg-[#f8f9fa] border border-[#e9ecef] rounded-full text-xs text-[#495057] hover:border-[#e91e63] hover:text-[#e91e63] transition-colors"
+                          className="h-7 px-2.5 inline-flex items-center bg-[#f8f9fa] border border-[#e9ecef] rounded-full text-[11px] text-[#495057] hover:border-[#e91e63] hover:text-[#e91e63] transition-colors"
                         >
                           {tag.name}
                         </Link>
@@ -918,25 +931,25 @@ export default function ProductClient(): ReactNode {
             </div>
           </section>
 
-          {/* Mobile sticky bottom CTA bar */}
+          {/* Mobile sticky action bar positioned cleanly above bottom navigation */}
           {numericPrice !== null && (
-            <div className="lg:hidden fixed inset-x-0 bottom-0 z-40 bg-white/95 backdrop-blur border-t border-[#e9ecef] px-4 py-2.5 flex items-center justify-between gap-3 shadow-[0_-4px_16px_rgba(33,37,41,0.08)]">
+            <div className="lg:hidden fixed inset-x-0 bottom-[60px] z-40 bg-white/95 backdrop-blur border-t border-[#e9ecef] px-4 py-2 flex items-center justify-between gap-2.5 shadow-[0_-4px_12px_rgba(33,37,41,0.06)]">
               <div className="min-w-0">
                 <p className="text-[11px] text-[#6c757d] truncate">{product.name}</p>
-                <p className="text-base font-bold text-[#212529]">{formatKD(numericPrice)}</p>
+                <p className="text-sm font-bold text-[#212529]">{formatKD(numericPrice)}</p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={handleAddToCart}
-                  className="h-10 px-3.5 border border-[#212529] bg-white text-[#212529] text-xs font-semibold uppercase rounded-lg"
+                  className="h-9 px-3 border border-[#212529] bg-white text-[#212529] text-[11px] font-semibold uppercase rounded-lg whitespace-nowrap"
                 >
                   Add cart
                 </button>
                 <button
                   type="button"
                   onClick={handleBuyNow}
-                  className="h-10 px-4 bg-[#e91e63] text-white text-xs font-semibold uppercase rounded-lg"
+                  className="h-9 px-3.5 bg-[#e91e63] text-white text-[11px] font-semibold uppercase rounded-lg whitespace-nowrap"
                 >
                   Buy now
                 </button>
@@ -963,7 +976,7 @@ export default function ProductClient(): ReactNode {
 
       <div
         aria-live="polite"
-        className={`fixed bottom-20 lg:bottom-6 right-4 sm:right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-4 py-3 rounded-lg shadow-xl flex items-center gap-2.5 transition-all duration-300 ${
+        className={`fixed bottom-32 lg:bottom-6 right-4 sm:right-6 z-[60] max-w-[280px] bg-[#212529] text-white text-sm font-medium px-4 py-3 rounded-lg shadow-xl flex items-center gap-2.5 transition-all duration-300 ${
           toast ? "translate-y-0 opacity-100" : "translate-y-5 opacity-0 pointer-events-none"
         }`}
       >
