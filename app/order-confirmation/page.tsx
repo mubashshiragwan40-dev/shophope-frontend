@@ -1,11 +1,20 @@
 // app/order-confirmation/page.tsx
 "use client";
 
-import { Suspense, useEffect, type ReactNode } from "react";
+import { Suspense, useEffect, useRef, type ReactNode } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { clearCart, readCart } from "@/lib/cart";
+import { trackMetaEvent } from "@/components/meta-pixel";
+import { LAST_COMPLETED_ORDER_KEY } from "@/app/checkout/page";
 import CheckoutSteps from "@/components/checkout-steps";
+
+interface StoredOrderSnapshot {
+  orderNumber?: string;
+  total?: number;
+  numItems?: number;
+  contentIds?: string[];
+}
 
 function CheckIcon(): ReactNode {
   return (
@@ -18,12 +27,43 @@ function CheckIcon(): ReactNode {
 function ConfirmationContent(): ReactNode {
   const searchParams = useSearchParams();
   const orderNumber: string = (searchParams.get("order") ?? "").trim();
+  const trackedRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (readCart().length > 0) {
       clearCart();
     }
   }, []);
+
+  useEffect(() => {
+    if (!orderNumber || trackedRef.current === orderNumber) return;
+    trackedRef.current = orderNumber;
+
+    let snapshot: StoredOrderSnapshot | null = null;
+    try {
+      const raw = sessionStorage.getItem(LAST_COMPLETED_ORDER_KEY);
+      if (raw) {
+        snapshot = JSON.parse(raw) as StoredOrderSnapshot;
+      }
+    } catch {
+      // Ignore storage errors
+    }
+
+    const matchesSnapshot = snapshot?.orderNumber === orderNumber;
+    trackMetaEvent("Purchase", {
+      transaction_id: orderNumber,
+      ...(matchesSnapshot && Array.isArray(snapshot?.contentIds)
+        ? { content_ids: snapshot.contentIds, content_type: "product" }
+        : {}),
+      ...(matchesSnapshot && typeof snapshot?.total === "number"
+        ? { value: Number(snapshot.total.toFixed(3)) }
+        : {}),
+      ...(matchesSnapshot && typeof snapshot?.numItems === "number"
+        ? { num_items: snapshot.numItems }
+        : {}),
+      currency: "KWD",
+    });
+  }, [orderNumber]);
 
   return (
     <>

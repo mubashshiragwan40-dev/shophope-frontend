@@ -7,6 +7,7 @@ import {
   CART_EVENT,
   clearCart,
   formatKD,
+  getCartCount,
   getCartSubtotal,
   readCart,
   removeFromCart,
@@ -14,6 +15,7 @@ import {
   type CartItem,
 } from "@/lib/cart";
 import { DELIVERY_FEE_KD } from "@/lib/orders";
+import { trackMetaEvent } from "@/components/meta-pixel";
 import CheckoutSteps from "@/components/checkout-steps";
 
 /* ============================================================
@@ -93,7 +95,6 @@ function CartRow({
           >
             {item.name}
           </Link>
-          {/* Mobile: unit price shown here */}
           <p className="md:hidden mt-1 text-[14px] text-[#6c757d]">{formatKD(item.price)}</p>
         </div>
       </div>
@@ -176,17 +177,14 @@ function TotalRow({ label, value, strong = false }: { label: string; value: Reac
 
 /* ============================================================
    PAGE
-   Header and footer come from app/layout.tsx (SiteHeader / SiteFooter).
    ============================================================ */
 export default function CartPage(): ReactNode {
   const [items, setItems] = useState<CartItem[]>([]);
   const [loaded, setLoaded] = useState<boolean>(false);
 
-  /* Load the cart and keep it in sync across the app */
   useEffect(() => {
     const sync = (): void => setItems(readCart());
     sync();
-    // Hydrate from localStorage after mount to avoid an SSR mismatch.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoaded(true);
     window.addEventListener(CART_EVENT, sync);
@@ -197,12 +195,11 @@ export default function CartPage(): ReactNode {
     };
   }, []);
 
-  /* Same totals and delivery fee as the checkout page */
   const subtotal: number = useMemo(() => getCartSubtotal(items), [items]);
+  const itemCount: number = useMemo(() => getCartCount(items), [items]);
   const shipping: number = items.length > 0 ? DELIVERY_FEE_KD : 0;
   const total: number = subtotal + shipping;
 
-  /* Shared cart functions enforce the 1 to 50 quantity limit and save the cart */
   const handleQuantityChange = (id: string, quantity: number): void => {
     updateCartQuantity(id, quantity);
   };
@@ -215,9 +212,19 @@ export default function CartPage(): ReactNode {
     clearCart();
   };
 
+  const handleProceedToCheckout = (): void => {
+    if (items.length === 0) return;
+    trackMetaEvent("InitiateCheckout", {
+      content_ids: items.map((item) => item.id),
+      content_type: "product",
+      value: Number(total.toFixed(3)),
+      currency: "KWD",
+      num_items: itemCount,
+    });
+  };
+
   return (
     <>
-      {/* Steps */}
       <section className="bg-[#f8f9fa] border-b border-[#f1f5f9]">
         <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 py-8">
           <CheckoutSteps current={0} />
@@ -226,7 +233,6 @@ export default function CartPage(): ReactNode {
 
       <section className="bg-white py-8 lg:py-12">
         <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0">
-          {/* Loading */}
           {!loaded && (
             <div className="grid gap-10 lg:grid-cols-[1fr_360px]">
               <div className="space-y-4">
@@ -237,7 +243,6 @@ export default function CartPage(): ReactNode {
             </div>
           )}
 
-          {/* Empty */}
           {loaded && items.length === 0 && (
             <div className="max-w-xl mx-auto text-center py-16 border border-[#f1f5f9] bg-[#f8f9fa] px-6">
               <div className="flex justify-center mb-5">
@@ -254,10 +259,8 @@ export default function CartPage(): ReactNode {
             </div>
           )}
 
-          {/* Cart */}
           {loaded && items.length > 0 && (
             <div className="grid gap-10 lg:grid-cols-[1fr_360px] items-start">
-              {/* Items table */}
               <div>
                 <div className="hidden md:grid grid-cols-[minmax(0,2fr)_1fr_1fr_1fr_40px] gap-6 pb-3 border-b-2 border-[#212529] text-[13px] font-semibold uppercase tracking-wide text-[#6c757d]">
                   <span>Product</span>
@@ -295,7 +298,6 @@ export default function CartPage(): ReactNode {
                 </div>
               </div>
 
-              {/* Cart totals */}
               <aside className="lg:sticky lg:top-28 border border-[#f1f5f9] bg-[#f8f9fa] p-6">
                 <h2 className="text-[16px] font-bold uppercase tracking-wide pb-4 border-b border-[#dee2e6]">
                   Cart Totals
@@ -317,6 +319,7 @@ export default function CartPage(): ReactNode {
 
                 <Link
                   href="/checkout"
+                  onClick={handleProceedToCheckout}
                   className="mt-6 flex h-[52px] w-full items-center justify-center bg-[#e91e63] hover:bg-[#c2185b] active:scale-[0.99] text-white text-[14px] font-semibold uppercase rounded-md transition-all"
                 >
                   Proceed to checkout

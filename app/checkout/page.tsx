@@ -27,6 +27,7 @@ import {
 import { EMAIL_RE, normalizeKuwaitPhone } from "@/lib/checkout-validation";
 import { getStoredToken } from "@/lib/auth";
 import { EXPRESS_BUY_NOW_KEY } from "@/app/product/[slug]/product-client";
+import { trackMetaEvent } from "@/components/meta-pixel";
 import CheckoutSteps from "@/components/checkout-steps";
 
 /* ============================================================
@@ -56,6 +57,13 @@ interface PaymentOption {
   description: string;
 }
 
+interface CompletedOrderSnapshot {
+  orderNumber: string;
+  total: number;
+  numItems: number;
+  contentIds: string[];
+}
+
 class OrderError extends Error {
   fields?: FormErrors;
   constructor(message: string, fields?: FormErrors) {
@@ -69,6 +77,7 @@ class OrderError extends Error {
    CONSTANTS
    ============================================================ */
 const SAVED_KW_ADDRESS_PREFIX = "shophope-kw-wa-addr-";
+export const LAST_COMPLETED_ORDER_KEY = "shophope-last-order";
 const OTHER_AREA_VALUE = "__OTHER__";
 
 const PAYMENT_OPTIONS: PaymentOption[] = [
@@ -617,6 +626,7 @@ function CheckoutContent(): ReactNode {
 
   const submittingRef = useRef<boolean>(false);
   const idempotencyKeyRef = useRef<string>("");
+  const trackedPurchaseRef = useRef<string | null>(null);
 
   useEffect(() => {
     idempotencyKeyRef.current = newIdempotencyKey();
@@ -754,6 +764,10 @@ function CheckoutContent(): ReactNode {
       return;
     }
 
+    const orderSnapshotTotal = Number(total.toFixed(3));
+    const orderSnapshotItemsCount = itemCount;
+    const orderSnapshotIds = activeItems.map((i) => i.id);
+
     submittingRef.current = true;
     setSubmitting(true);
 
@@ -794,6 +808,31 @@ function CheckoutContent(): ReactNode {
         setExpressItem(null);
       } else {
         clearCart();
+      }
+
+      const snapshot: CompletedOrderSnapshot = {
+        orderNumber: order.orderNumber,
+        total: orderSnapshotTotal,
+        numItems: orderSnapshotItemsCount,
+        contentIds: orderSnapshotIds,
+      };
+
+      try {
+        sessionStorage.setItem(LAST_COMPLETED_ORDER_KEY, JSON.stringify(snapshot));
+      } catch {
+        // Ignore storage errors
+      }
+
+      if (trackedPurchaseRef.current !== order.orderNumber) {
+        trackedPurchaseRef.current = order.orderNumber;
+        trackMetaEvent("Purchase", {
+          transaction_id: order.orderNumber,
+          content_ids: orderSnapshotIds,
+          content_type: "product",
+          value: orderSnapshotTotal,
+          currency: "KWD",
+          num_items: orderSnapshotItemsCount,
+        });
       }
 
       setOrderPhone(order.phone);
