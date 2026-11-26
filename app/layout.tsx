@@ -28,6 +28,9 @@ export const metadata: Metadata = {
     "beauty products Kuwait",
     "cash on delivery Kuwait",
   ],
+  other: {
+    "facebook-domain-verification": "4nzpmbhv7sh3xb48bkxgfu36ws4g3c",
+  },
   alternates: {
     canonical: "/",
   },
