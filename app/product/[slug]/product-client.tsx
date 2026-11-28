@@ -32,6 +32,8 @@ interface GraphQLVariation {
   name: string;
   price: string | null;
   regularPrice: string | null;
+  stockStatus?: string | null;
+  purchasable?: boolean | null;
   image: { sourceUrl: string } | null;
   attributes: { nodes: VariationAttribute[] } | null;
 }
@@ -89,13 +91,19 @@ const PRODUCT_QUERY: string = `
       ... on VariableProduct {
         price
         regularPrice
-        variations(first: 50) {
+        variations(first: 100) {
           nodes {
             id
             databaseId
             name
             price
             regularPrice
+            ... on InventoriedProduct {
+              stockStatus
+            }
+            ... on ProductVariation {
+              purchasable
+            }
             image {
               sourceUrl
             }
@@ -193,6 +201,45 @@ function getDiscountPercent(
 function stripHtml(html: string | null | undefined): string {
   if (!html) return "";
   return htmlToText(html).trim();
+}
+
+function normalizeAttrKey(name: string): string {
+  return name.trim().toLowerCase().replace(/^pa_/, "").replace(/[-_]+/g, " ");
+}
+
+function normalizeAttrVal(val: string): string {
+  return val.trim().toLowerCase().replace(/[-_]+/g, " ");
+}
+
+function isColorAttr(attrName: string): boolean {
+  const k = normalizeAttrKey(attrName);
+  return k === "color" || k === "colour" || k.includes("color") || k.includes("colour");
+}
+
+function isVariationAvailable(v: GraphQLVariation): boolean {
+  if (v.purchasable === false) return false;
+  if (v.stockStatus && v.stockStatus.trim().toUpperCase() === "OUT_OF_STOCK") {
+    return false;
+  }
+  return true;
+}
+
+function variationMatchesAttr(
+  v: GraphQLVariation,
+  attrName: string,
+  expectedVal: string
+): boolean {
+  const targetKey = normalizeAttrKey(attrName);
+  const targetVal = normalizeAttrVal(expectedVal);
+  const nodes = v.attributes?.nodes ?? [];
+
+  const matched = nodes.find((a) => normalizeAttrKey(a.name) === targetKey);
+  if (!matched || !matched.value) return false;
+
+  const raw = matched.value.trim();
+  if (raw === "") return true;
+
+  return normalizeAttrVal(raw) === targetVal;
 }
 
 function formatOptionLabel(raw: string): string {
@@ -548,24 +595,88 @@ export default function ProductClient(): ReactNode {
   }, [toast]);
 
   const variations: GraphQLVariation[] = useMemo(
-    () => product?.variations?.nodes ?? [],
+    () => (product?.variations?.nodes ?? []).filter(isVariationAvailable),
     [product]
   );
 
-  const attributeGroups: Array<{ name: string; options: string[] }> = useMemo(() => {
-    const map = new Map<string, Set<string>>();
+  const attributeNames: string[] = useMemo(() => {
+    const names: string[] = [];
+    const seen = new Set<string>();
+
     for (const v of variations) {
       for (const attr of v.attributes?.nodes ?? []) {
-        if (!attr.name || !attr.value) continue;
-        if (!map.has(attr.name)) map.set(attr.name, new Set<string>());
-        map.get(attr.name)?.add(attr.value);
+        if (!attr.name) continue;
+        const key = normalizeAttrKey(attr.name);
+        if (!seen.has(key)) {
+          seen.add(key);
+          names.push(attr.name);
+        }
       }
     }
-    return Array.from(map.entries()).map(([name, set]) => ({
-      name,
-      options: Array.from(set),
-    }));
+
+    return names.sort((a, b) => {
+      const aColor = isColorAttr(a) ? 0 : 1;
+      const bColor = isColorAttr(b) ? 0 : 1;
+      return aColor - bColor;
+    });
   }, [variations]);
+
+  const attributeGroups: Array<{ name: string; options: string[] }> = useMemo(() => {
+    return attributeNames.map((groupName) => {
+      const options: string[] = [];
+      const seenVal = new Set<string>();
+
+      for (const v of variations) {
+        const matchesOtherSelected = Object.entries(selectedAttrs).every(
+          ([otherName, chosenVal]) => {
+            if (!chosenVal) return true;
+            if (normalizeAttrKey(otherName) === normalizeAttrKey(groupName)) return true;
+            return variationMatchesAttr(v, otherName, chosenVal);
+          }
+        );
+
+        if (!matchesOtherSelected) continue;
+
+        const targetKey = normalizeAttrKey(groupName);
+        const attr = (v.attributes?.nodes ?? []).find(
+          (a) => normalizeAttrKey(a.name) === targetKey
+        );
+        const rawVal = attr?.value?.trim();
+        if (!rawVal) continue;
+
+        const normVal = normalizeAttrVal(rawVal);
+        if (!seenVal.has(normVal)) {
+          seenVal.add(normVal);
+          options.push(rawVal);
+        }
+      }
+
+      return { name: groupName, options };
+    });
+  }, [variations, attributeNames, selectedAttrs]);
+
+  useEffect(() => {
+    if (attributeGroups.length === 0) return;
+
+    setSelectedAttrs((prev) => {
+      let changed = false;
+      const next: Record<string, string> = { ...prev };
+
+      for (const group of attributeGroups) {
+        const current = next[group.name];
+        if (!current) continue;
+        const stillValid = group.options.some(
+          (opt) => normalizeAttrVal(opt) === normalizeAttrVal(current)
+        );
+        if (!stillValid) {
+          delete next[group.name];
+          changed = true;
+        }
+      }
+
+      return changed ? next : prev;
+    });
+  }, [attributeGroups]);
 
   const matchedVariation: GraphQLVariation | null = useMemo(() => {
     if (variations.length === 0) return null;
@@ -575,8 +686,7 @@ export default function ProductClient(): ReactNode {
       attributeGroups.every((group) => {
         const chosen = selectedAttrs[group.name];
         if (!chosen) return false;
-        const foundAttr = (v.attributes?.nodes ?? []).find((a) => a.name === group.name);
-        return foundAttr?.value === chosen;
+        return variationMatchesAttr(v, group.name, chosen);
       })
     );
     return exact ?? null;
