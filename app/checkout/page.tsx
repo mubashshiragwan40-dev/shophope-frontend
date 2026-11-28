@@ -4,6 +4,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import Script from "next/script";
 import {
   CART_EVENT,
   type CartItem,
@@ -25,7 +26,6 @@ import {
   type PaymentMethod,
 } from "@/lib/orders";
 import { EMAIL_RE, normalizeKuwaitPhone } from "@/lib/checkout-validation";
-import { getStoredToken } from "@/lib/auth";
 import { EXPRESS_BUY_NOW_KEY } from "@/app/product/[slug]/product-client";
 import { trackMetaEvent } from "@/components/meta-pixel";
 import CheckoutSteps from "@/components/checkout-steps";
@@ -64,6 +64,34 @@ interface CompletedOrderSnapshot {
   contentIds: string[];
 }
 
+interface GoogleJwtPayload {
+  given_name?: string;
+  family_name?: string;
+  name?: string;
+  email?: string;
+}
+
+interface GoogleCredentialResponse {
+  credential?: string;
+}
+
+declare global {
+  interface Window {
+    google?: {
+      accounts?: {
+        id?: {
+          initialize: (config: {
+            client_id: string;
+            callback: (response: GoogleCredentialResponse) => void;
+            auto_select?: boolean;
+          }) => void;
+          prompt: () => void;
+        };
+      };
+    };
+  }
+}
+
 class OrderError extends Error {
   fields?: FormErrors;
   constructor(message: string, fields?: FormErrors) {
@@ -79,6 +107,7 @@ class OrderError extends Error {
 const SAVED_KW_ADDRESS_PREFIX = "shophope-kw-wa-addr-";
 export const LAST_COMPLETED_ORDER_KEY = "shophope-last-order";
 const OTHER_AREA_VALUE = "__OTHER__";
+const GOOGLE_CLIENT_ID: string = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
 
 const PAYMENT_OPTIONS: PaymentOption[] = [
   {
@@ -113,6 +142,61 @@ function isKuwaitMobile(value: string): boolean {
   return KUWAIT_MOBILE_RE.test(normalizeKuwaitPhone(value.trim()));
 }
 
+function clearStaleAuthTokens(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const authKeyRegex = /(jwt|auth|token|session|bearer)/i;
+    for (let i = window.localStorage.length - 1; i >= 0; i--) {
+      const key = window.localStorage.key(i);
+      if (key && authKeyRegex.test(key) && !key.startsWith(SAVED_KW_ADDRESS_PREFIX)) {
+        window.localStorage.removeItem(key);
+      }
+    }
+    for (let i = window.sessionStorage.length - 1; i >= 0; i--) {
+      const key = window.sessionStorage.key(i);
+      if (
+        key &&
+        authKeyRegex.test(key) &&
+        key !== EXPRESS_BUY_NOW_KEY &&
+        key !== LAST_COMPLETED_ORDER_KEY
+      ) {
+        window.sessionStorage.removeItem(key);
+      }
+    }
+    if (typeof document !== "undefined" && document.cookie) {
+      for (const part of document.cookie.split(";")) {
+        const eqIdx = part.indexOf("=");
+        const name = (eqIdx > -1 ? part.slice(0, eqIdx) : part).trim();
+        if (name && authKeyRegex.test(name)) {
+          document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+        }
+      }
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+}
+
+function parseGoogleJwt(jwt: string): GoogleJwtPayload | null {
+  try {
+    const parts = jwt.split(".");
+    if (parts.length < 2) return null;
+    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
+    return JSON.parse(atob(padded)) as GoogleJwtPayload;
+  } catch {
+    return null;
+  }
+}
+
+function splitNameParts(fullName: string | undefined): { first: string; last: string } {
+  const trimmed = (fullName ?? "").trim();
+  if (!trimmed) return { first: "", last: "" };
+  const pieces = trimmed.split(/\s+/);
+  if (pieces.length === 1) return { first: pieces[0], last: "" };
+  return { first: pieces[0], last: pieces.slice(1).join(" ") };
+}
+
 function validate(form: CheckoutForm): FormErrors {
   const errors: FormErrors = {};
   if (form.email.trim().length > 0 && !EMAIL_RE.test(form.email.trim())) {
@@ -142,6 +226,7 @@ async function placeOrder(
   items: CartItem[],
   idempotencyKey: string
 ): Promise<CreateOrderResponse> {
+  clearStaleAuthTokens();
   const delivery: DeliveryMethod = "standard";
 
   const body: CreateOrderRequest = {
@@ -164,14 +249,11 @@ async function placeOrder(
     payment: form.payment,
   };
 
-  const token: string | null = getStoredToken();
-
   const res = await fetch("/api/orders", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Idempotency-Key": idempotencyKey,
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(body),
   });
@@ -211,6 +293,29 @@ function CheckIcon({ size = 28 }: { size?: number }): ReactNode {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
+function GoogleIcon(): ReactNode {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        fill="#4285F4"
+        d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.54-1.14 2.85-2.4 3.72v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.72Z"
+      />
+      <path
+        fill="#34A853"
+        d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
+      />
+      <path
+        fill="#EA4335"
+        d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
+      />
     </svg>
   );
 }
@@ -331,6 +436,7 @@ function GovernorateField({
         id="governorate"
         name="governorate"
         value={value}
+        autoComplete="address-level1"
         aria-invalid={Boolean(error)}
         aria-describedby={error ? errorId : undefined}
         onChange={(e) => onChange(e.target.value)}
@@ -384,6 +490,7 @@ function AreaSelectField({
         name="areaSelect"
         value={selectValue}
         disabled={!governorate}
+        autoComplete="address-level2"
         aria-invalid={Boolean(error)}
         aria-describedby={error ? errorId : undefined}
         onChange={(e) => onSelectChange(e.target.value)}
@@ -411,6 +518,7 @@ function AreaSelectField({
           name="area"
           value={value}
           placeholder="Enter your area name"
+          autoComplete="address-level2"
           aria-label="Custom area name"
           onChange={(e) => onCustomAreaChange(e.target.value)}
           className={`${inputClass(Boolean(error))} mt-2`}
@@ -619,6 +727,8 @@ function CheckoutContent(): ReactNode {
   const [customAreaMode, setCustomAreaMode] = useState<boolean>(false);
   const [errors, setErrors] = useState<FormErrors>({});
   const [autofillNotice, setAutofillNotice] = useState<string | null>(null);
+  const [googleNotice, setGoogleNotice] = useState<string | null>(null);
+  const [googleReady, setGoogleReady] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [orderRef, setOrderRef] = useState<string | null>(null);
@@ -629,6 +739,7 @@ function CheckoutContent(): ReactNode {
   const trackedPurchaseRef = useRef<string | null>(null);
 
   useEffect(() => {
+    clearStaleAuthTokens();
     idempotencyKeyRef.current = newIdempotencyKey();
   }, []);
 
@@ -706,6 +817,56 @@ function CheckoutContent(): ReactNode {
       delete next[key];
       return next;
     });
+  };
+
+  const handleGoogleFill = (): void => {
+    setSubmitError(null);
+    if (!GOOGLE_CLIENT_ID) {
+      setGoogleNotice(
+        "1-Click Fill with Google is ready (add NEXT_PUBLIC_GOOGLE_CLIENT_ID to enable popup). You can also fill the guest form directly below."
+      );
+      return;
+    }
+
+    const gsi = window.google?.accounts?.id;
+    if (!gsi || !googleReady) {
+      setGoogleNotice("Loading Google one-tap helper... please try again in a second.");
+      return;
+    }
+
+    gsi.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      auto_select: false,
+      callback: (res) => {
+        if (!res.credential) return;
+        const payload = parseGoogleJwt(res.credential);
+        if (!payload) return;
+        const split = splitNameParts(payload.name);
+        const first = (payload.given_name ?? split.first).trim();
+        const last = (payload.family_name ?? split.last).trim();
+        const email = (payload.email ?? "").trim();
+
+        setForm((prev) => ({
+          ...prev,
+          firstName: first || prev.firstName,
+          lastName: last || prev.lastName,
+          email: email || prev.email,
+        }));
+        setErrors((prev) => {
+          const next = { ...prev };
+          if (first) delete next.firstName;
+          if (last) delete next.lastName;
+          if (email) delete next.email;
+          return next;
+        });
+        setGoogleNotice(
+          email
+            ? `Auto-filled from Google (${email}). Enter your +965 WhatsApp & address below.`
+            : "Auto-filled your name from Google. Enter your +965 WhatsApp & address below."
+        );
+      },
+    });
+    gsi.prompt();
   };
 
   const handleGovernorateChange = (newGov: string): void => {
@@ -865,6 +1026,14 @@ function CheckoutContent(): ReactNode {
 
   return (
     <>
+      {GOOGLE_CLIENT_ID && (
+        <Script
+          src="https://accounts.google.com/gsi/client"
+          strategy="afterInteractive"
+          onLoad={() => setGoogleReady(true)}
+        />
+      )}
+
       <section className="bg-[#f8f9fa] border-b border-[#f1f5f9]">
         <div className="max-w-[1260px] mx-auto px-4 sm:px-6 lg:px-0 py-8 text-center">
           <h1 className="text-3xl sm:text-4xl font-bold tracking-tight text-[#212529]">Checkout</h1>
@@ -934,202 +1103,232 @@ function CheckoutContent(): ReactNode {
 
           {hydrated && activeItems.length > 0 && !showSuccess && (
             <div className="grid gap-8 lg:grid-cols-[1fr_380px] items-start">
-              <form id="checkout-form" onSubmit={handleSubmit} noValidate className="space-y-6">
-                <SectionCard step={1} title="WhatsApp & Contact Info" badge="WhatsApp-First • Email Optional">
-                  {autofillNotice && (
-                    <div className="mb-4 rounded-md border border-[#198754]/30 bg-[#e8f5ee] px-4 py-2.5 text-[13px] font-medium text-[#198754]">
-                      {autofillNotice}
+              <div className="space-y-6">
+                {/* Dual Option Top Bar: 1-Click Fill with Google + Guest Form */}
+                <div className="bg-[#f8f9fa] border border-[#f1f5f9] rounded-lg p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                  <div>
+                    <p className="text-[14px] font-bold text-[#212529]">
+                      Guest Checkout — No Account or Password Required
+                    </p>
+                    <p className="text-[12px] text-[#6c757d] mt-0.5">
+                      1-Click Fill with Google for Name &amp; Gmail, or fill the Guest Checkout Form directly below.
+                    </p>
+                    {googleNotice && (
+                      <p className="text-[12px] font-medium text-[#198754] mt-1.5">{googleNotice}</p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleGoogleFill}
+                    className="h-11 px-4 rounded-md border border-[#dee2e6] bg-white hover:bg-[#f1f3f5] text-[#212529] text-[13px] font-semibold inline-flex items-center justify-center gap-2.5 shrink-0 transition-colors"
+                  >
+                    <GoogleIcon />
+                    <span>1-Click Fill with Google</span>
+                  </button>
+                </div>
+
+                <form id="checkout-form" onSubmit={handleSubmit} noValidate className="space-y-6">
+                  <SectionCard step={1} title="WhatsApp & Contact Info" badge="WhatsApp-First • Email Optional">
+                    {autofillNotice && (
+                      <div className="mb-4 rounded-md border border-[#198754]/30 bg-[#e8f5ee] px-4 py-2.5 text-[13px] font-medium text-[#198754]">
+                        {autofillNotice}
+                      </div>
+                    )}
+
+                    <div className="grid gap-5 sm:grid-cols-2">
+                      <div className="sm:col-span-2">
+                        <FieldLabel htmlFor="phone">Kuwait WhatsApp Number</FieldLabel>
+                        <div className="flex">
+                          <span className="inline-flex h-12 items-center rounded-l-md border border-r-0 border-[#dee2e6] bg-[#f8f9fa] px-4 text-[15px] font-semibold text-[#212529]">
+                            +965
+                          </span>
+                          <input
+                            id="phone"
+                            name="phone"
+                            type="tel"
+                            maxLength={8}
+                            value={form.phone}
+                            placeholder="5XXX XXXX"
+                            autoComplete="tel-national"
+                            inputMode="tel"
+                            aria-invalid={Boolean(errors.phone)}
+                            aria-describedby={errors.phone ? "phone-error" : undefined}
+                            onChange={(e) =>
+                              updateField("phone", e.target.value.replace(/\D/g, "").slice(0, 8))
+                            }
+                            className={`${inputClass(Boolean(errors.phone))} rounded-l-none`}
+                          />
+                        </div>
+                        <FieldError id="phone-error" message={errors.phone} />
+                        <p className="mt-1.5 text-[12px] text-[#6c757d]">
+                          Order confirmation &amp; rider updates will be sent on WhatsApp.
+                        </p>
+                      </div>
+
+                      <TextField
+                        name="email"
+                        label="Email address"
+                        type="email"
+                        optional
+                        value={form.email}
+                        error={errors.email}
+                        onChange={(v) => updateField("email", v)}
+                        autoComplete="email"
+                        inputMode="email"
+                        placeholder="you@example.com (optional)"
+                        className="sm:col-span-2"
+                      />
+                    </div>
+                  </SectionCard>
+
+                  <SectionCard step={2} title="Kuwait Delivery Address">
+                    <div className="grid gap-5 sm:grid-cols-2">
+                      <TextField
+                        name="firstName"
+                        label="First name"
+                        value={form.firstName}
+                        error={errors.firstName}
+                        onChange={(v) => updateField("firstName", v)}
+                        autoComplete="given-name"
+                      />
+                      <TextField
+                        name="lastName"
+                        label="Last name"
+                        value={form.lastName}
+                        error={errors.lastName}
+                        onChange={(v) => updateField("lastName", v)}
+                        autoComplete="family-name"
+                      />
+
+                      <GovernorateField
+                        value={form.governorate}
+                        error={errors.governorate}
+                        onChange={handleGovernorateChange}
+                      />
+
+                      <AreaSelectField
+                        governorate={form.governorate}
+                        value={form.area}
+                        customAreaMode={customAreaMode}
+                        error={errors.area}
+                        onSelectChange={handleAreaSelectChange}
+                        onCustomAreaChange={(v) => updateField("area", v)}
+                      />
+
+                      <TextField
+                        name="block"
+                        label="Block"
+                        inputMode="numeric"
+                        placeholder="e.g. 10"
+                        value={form.block}
+                        error={errors.block}
+                        onChange={(v) => updateField("block", v)}
+                        autoComplete="address-line2"
+                      />
+                      <TextField
+                        name="street"
+                        label="Street"
+                        placeholder="e.g. Street 5"
+                        value={form.street}
+                        error={errors.street}
+                        onChange={(v) => updateField("street", v)}
+                        autoComplete="street-address"
+                      />
+
+                      <TextField
+                        name="building"
+                        label="House or building number"
+                        value={form.building}
+                        error={errors.building}
+                        onChange={(v) => updateField("building", v)}
+                        autoComplete="address-line2"
+                      />
+                      <div className="grid grid-cols-2 gap-4">
+                        <TextField
+                          name="floor"
+                          label="Floor"
+                          optional
+                          inputMode="numeric"
+                          value={form.floor}
+                          onChange={(v) => updateField("floor", v)}
+                          autoComplete="address-line2"
+                        />
+                        <TextField
+                          name="apartment"
+                          label="Apartment"
+                          optional
+                          inputMode="numeric"
+                          value={form.apartment}
+                          onChange={(v) => updateField("apartment", v)}
+                          autoComplete="address-line2"
+                        />
+                      </div>
+
+                      <div className="sm:col-span-2">
+                        <FieldLabel htmlFor="deliveryNote" optional>
+                          Delivery instructions
+                        </FieldLabel>
+                        <textarea
+                          id="deliveryNote"
+                          name="deliveryNote"
+                          rows={3}
+                          value={form.deliveryNote}
+                          onChange={(e) => updateField("deliveryNote", e.target.value)}
+                          placeholder="Landmark, gate color or other directions for the driver"
+                          className="w-full px-4 py-3 bg-white border border-[#dee2e6] rounded-md text-[15px] placeholder:text-[#adb5bd] focus:outline-none focus:ring-2 focus:ring-[#e91e63]/20 focus:border-[#e91e63] resize-none"
+                        />
+                      </div>
+                    </div>
+
+                    <p className="mt-4 text-[13px] text-[#6c757d]">
+                      Flat delivery fee across Kuwait:{" "}
+                      <span className="font-semibold text-[#212529]">{formatKD(DELIVERY_FEE_KD)}</span>.
+                    </p>
+                  </SectionCard>
+
+                  <SectionCard step={3} title="Payment method">
+                    <div className="space-y-3">
+                      {PAYMENT_OPTIONS.map((option) => (
+                        <OptionCard
+                          key={option.value}
+                          name="payment"
+                          checked={form.payment === option.value}
+                          onSelect={() => updateField("payment", option.value)}
+                          title={option.title}
+                          description={option.description}
+                        />
+                      ))}
+                    </div>
+                  </SectionCard>
+
+                  {submitError && (
+                    <div role="alert" className="border border-[#f5c2c7] bg-[#f8d7da] text-[#842029] text-[14px] p-4 rounded-md">
+                      {submitError}
                     </div>
                   )}
 
-                  <div className="grid gap-5 sm:grid-cols-2">
-                    <div className="sm:col-span-2">
-                      <FieldLabel htmlFor="phone">Kuwait WhatsApp Number</FieldLabel>
-                      <div className="flex">
-                        <span className="inline-flex h-12 items-center rounded-l-md border border-r-0 border-[#dee2e6] bg-[#f8f9fa] px-4 text-[15px] font-semibold text-[#212529]">
-                          +965
-                        </span>
-                        <input
-                          id="phone"
-                          name="phone"
-                          type="tel"
-                          maxLength={8}
-                          value={form.phone}
-                          placeholder="5XXX XXXX"
-                          autoComplete="tel-national"
-                          inputMode="tel"
-                          aria-invalid={Boolean(errors.phone)}
-                          aria-describedby={errors.phone ? "phone-error" : undefined}
-                          onChange={(e) =>
-                            updateField("phone", e.target.value.replace(/\D/g, "").slice(0, 8))
-                          }
-                          className={`${inputClass(Boolean(errors.phone))} rounded-l-none`}
-                        />
-                      </div>
-                      <FieldError id="phone-error" message={errors.phone} />
-                      <p className="mt-1.5 text-[12px] text-[#6c757d]">
-                        Order confirmation & rider updates will be sent on WhatsApp.
-                      </p>
-                    </div>
-
-                    <TextField
-                      name="email"
-                      label="Email address"
-                      type="email"
-                      optional
-                      value={form.email}
-                      error={errors.email}
-                      onChange={(v) => updateField("email", v)}
-                      autoComplete="email"
-                      inputMode="email"
-                      placeholder="you@example.com (optional)"
-                      className="sm:col-span-2"
-                    />
+                  <div className="bg-white border border-[#f1f5f9] rounded-lg p-5 sm:p-6">
+                    <p className="text-[13px] text-[#6c757d] mb-4">
+                      By placing your order you agree to our{" "}
+                      <Link href="/refund-policy" className="text-[#e91e63] underline underline-offset-2">
+                        Refund and Returns Policy
+                      </Link>{" "}
+                      and{" "}
+                      <Link href="/privacy-policy" className="text-[#e91e63] underline underline-offset-2">
+                        Privacy Policy
+                      </Link>
+                      .
+                    </p>
+                    <button
+                      type="submit"
+                      disabled={submitting}
+                      className="w-full h-14 bg-[#e91e63] hover:bg-[#c2185b] disabled:opacity-70 disabled:cursor-wait active:scale-[0.99] text-white text-[15px] font-bold uppercase tracking-wide rounded-md transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63] focus-visible:ring-offset-2"
+                    >
+                      {submitting ? "Placing order..." : `Place order · ${formatKD(total)}`}
+                    </button>
                   </div>
-                </SectionCard>
-
-                <SectionCard step={2} title="Kuwait Delivery Address">
-                  <div className="grid gap-5 sm:grid-cols-2">
-                    <TextField
-                      name="firstName"
-                      label="First name"
-                      value={form.firstName}
-                      error={errors.firstName}
-                      onChange={(v) => updateField("firstName", v)}
-                      autoComplete="given-name"
-                    />
-                    <TextField
-                      name="lastName"
-                      label="Last name"
-                      value={form.lastName}
-                      error={errors.lastName}
-                      onChange={(v) => updateField("lastName", v)}
-                      autoComplete="family-name"
-                    />
-
-                    <GovernorateField
-                      value={form.governorate}
-                      error={errors.governorate}
-                      onChange={handleGovernorateChange}
-                    />
-
-                    <AreaSelectField
-                      governorate={form.governorate}
-                      value={form.area}
-                      customAreaMode={customAreaMode}
-                      error={errors.area}
-                      onSelectChange={handleAreaSelectChange}
-                      onCustomAreaChange={(v) => updateField("area", v)}
-                    />
-
-                    <TextField
-                      name="block"
-                      label="Block"
-                      inputMode="numeric"
-                      placeholder="e.g. 10"
-                      value={form.block}
-                      error={errors.block}
-                      onChange={(v) => updateField("block", v)}
-                    />
-                    <TextField
-                      name="street"
-                      label="Street"
-                      placeholder="e.g. Street 5"
-                      value={form.street}
-                      error={errors.street}
-                      onChange={(v) => updateField("street", v)}
-                    />
-
-                    <TextField
-                      name="building"
-                      label="House or building number"
-                      value={form.building}
-                      error={errors.building}
-                      onChange={(v) => updateField("building", v)}
-                    />
-                    <div className="grid grid-cols-2 gap-4">
-                      <TextField
-                        name="floor"
-                        label="Floor"
-                        optional
-                        inputMode="numeric"
-                        value={form.floor}
-                        onChange={(v) => updateField("floor", v)}
-                      />
-                      <TextField
-                        name="apartment"
-                        label="Apartment"
-                        optional
-                        inputMode="numeric"
-                        value={form.apartment}
-                        onChange={(v) => updateField("apartment", v)}
-                      />
-                    </div>
-
-                    <div className="sm:col-span-2">
-                      <FieldLabel htmlFor="deliveryNote" optional>
-                        Delivery instructions
-                      </FieldLabel>
-                      <textarea
-                        id="deliveryNote"
-                        name="deliveryNote"
-                        rows={3}
-                        value={form.deliveryNote}
-                        onChange={(e) => updateField("deliveryNote", e.target.value)}
-                        placeholder="Landmark, gate color or other directions for the driver"
-                        className="w-full px-4 py-3 bg-white border border-[#dee2e6] rounded-md text-[15px] placeholder:text-[#adb5bd] focus:outline-none focus:ring-2 focus:ring-[#e91e63]/20 focus:border-[#e91e63] resize-none"
-                      />
-                    </div>
-                  </div>
-
-                  <p className="mt-4 text-[13px] text-[#6c757d]">
-                    Flat delivery fee across Kuwait:{" "}
-                    <span className="font-semibold text-[#212529]">{formatKD(DELIVERY_FEE_KD)}</span>.
-                  </p>
-                </SectionCard>
-
-                <SectionCard step={3} title="Payment method">
-                  <div className="space-y-3">
-                    {PAYMENT_OPTIONS.map((option) => (
-                      <OptionCard
-                        key={option.value}
-                        name="payment"
-                        checked={form.payment === option.value}
-                        onSelect={() => updateField("payment", option.value)}
-                        title={option.title}
-                        description={option.description}
-                      />
-                    ))}
-                  </div>
-                </SectionCard>
-
-                {submitError && (
-                  <div role="alert" className="border border-[#f5c2c7] bg-[#f8d7da] text-[#842029] text-[14px] p-4 rounded-md">
-                    {submitError}
-                  </div>
-                )}
-
-                <div className="bg-white border border-[#f1f5f9] rounded-lg p-5 sm:p-6">
-                  <p className="text-[13px] text-[#6c757d] mb-4">
-                    By placing your order you agree to our{" "}
-                    <Link href="/refund-policy" className="text-[#e91e63] underline underline-offset-2">
-                      Refund and Returns Policy
-                    </Link>{" "}
-                    and{" "}
-                    <Link href="/privacy-policy" className="text-[#e91e63] underline underline-offset-2">
-                      Privacy Policy
-                    </Link>
-                    .
-                  </p>
-                  <button
-                    type="submit"
-                    disabled={submitting}
-                    className="w-full h-14 bg-[#e91e63] hover:bg-[#c2185b] disabled:opacity-70 disabled:cursor-wait active:scale-[0.99] text-white text-[15px] font-bold uppercase tracking-wide rounded-md transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#e91e63] focus-visible:ring-offset-2"
-                  >
-                    {submitting ? "Placing order..." : `Place order · ${formatKD(total)}`}
-                  </button>
-                </div>
-              </form>
+                </form>
+              </div>
 
               <OrderSummary
                 items={activeItems}

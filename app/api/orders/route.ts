@@ -2,7 +2,6 @@
 import { NextResponse } from "next/server";
 import { wcFetch, WooError } from "@/lib/woocommerce";
 import { normalizeKuwaitPhone, validateCheckoutCustomer } from "@/lib/checkout-validation";
-import { graphqlRequest, ExpiredTokenError, GraphQLError } from "@/lib/graphql";
 import { sendWhatsAppOrderConfirmation } from "@/lib/whatsapp";
 import {
   DELIVERY_FEE_KD,
@@ -48,18 +47,9 @@ const MIN_QUANTITY: number = 1;
 const MAX_QUANTITY: number = 50;
 const MAX_BODY_BYTES: number = 20_000;
 const KUWAIT_COUNTRY: string = "KW";
-const SESSION_EXPIRED_MESSAGE: string = "Your session has expired. Please log in again.";
 
 const ALLOWED_DELIVERY: ReadonlyArray<DeliveryMethod> = ["standard"];
 const ALLOWED_PAYMENT: ReadonlyArray<PaymentMethod> = ["cod"];
-
-const VIEWER_ID_QUERY: string = /* GraphQL */ `
-  query ViewerId {
-    viewer {
-      databaseId
-    }
-  }
-`;
 
 /* ============================================================
    HELPERS
@@ -81,31 +71,6 @@ function errorResponse(
   fields?: Record<string, string>
 ): NextResponse {
   return NextResponse.json(fields ? { error: message, fields } : { error: message }, { status });
-}
-
-async function getCustomerIdFromRequest(request: Request): Promise<number | null> {
-  const header: string = (request.headers.get("Authorization") ?? "").trim();
-  if (header === "") return null;
-
-  const token: string = header.replace(/^Bearer\s+/i, "").trim();
-  if (token === "") return null;
-
-  try {
-    const data = await graphqlRequest<{ viewer: { databaseId: number } | null }>(
-      VIEWER_ID_QUERY,
-      undefined,
-      token
-    );
-    const id: unknown = data.viewer?.databaseId;
-    if (typeof id === "number" && Number.isInteger(id) && id > 0) return id;
-  } catch (err: unknown) {
-    if (err instanceof ExpiredTokenError || err instanceof GraphQLError) {
-      throw new RequestError(SESSION_EXPIRED_MESSAGE, 401);
-    }
-    throw err;
-  }
-
-  throw new RequestError(SESSION_EXPIRED_MESSAGE, 401);
 }
 
 function toProductId(raw: unknown): number | null {
@@ -294,7 +259,6 @@ export async function POST(request: Request): Promise<NextResponse> {
       );
     }
 
-    const customerId: number | null = await getCustomerIdFromRequest(request);
     const lines: OrderLine[] = parseItems(b.items);
 
     const idempotencyKey: string | null = readIdempotencyKey(request);
@@ -314,10 +278,10 @@ export async function POST(request: Request): Promise<NextResponse> {
     const productsById = await loadProducts(lines);
 
     const eightDigits: string = normalizeKuwaitPhone(customer.phone);
-    const billingEmail: string =
-      customer.email && customer.email.trim().length > 0
-        ? customer.email.trim()
-        : `wa-${eightDigits}@noemail.shophope.online`;
+    const hasRealEmail: boolean = Boolean(customer.email && customer.email.trim().length > 0);
+    const billingEmail: string = hasRealEmail
+      ? customer.email!.trim()
+      : `guest_${eightDigits}@no-reply.shophope.online`;
 
     const address = {
       first_name: customer.firstName,
@@ -337,7 +301,7 @@ export async function POST(request: Request): Promise<NextResponse> {
 
     const metaData = [
       { key: "_shophope_whatsapp_number", value: customer.phone },
-      { key: "_shophope_email_optional", value: customer.email ? "provided" : "omitted" },
+      { key: "_shophope_email_optional", value: hasRealEmail ? "provided" : "omitted" },
       ...(idempotencyKey ? [{ key: "_idempotency_key", value: idempotencyKey }] : []),
     ];
 
@@ -356,7 +320,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     const created: WcCreatedOrder = await wcFetch<WcCreatedOrder>("/orders", {
       method: "POST",
       body: JSON.stringify({
-        customer_id: customerId ?? 0,
+        customer_id: 0,
         status: "processing",
         set_paid: false,
         payment_method: "cod",
