@@ -9,6 +9,11 @@ import { addToCart, formatKD, type CartItem } from "@/lib/cart";
 import { EXPRESS_BUY_NOW_KEY } from "@/app/product/[slug]/product-client";
 import { SHOP_OPEN_FILTERS_EVENT } from "@/components/site-header";
 import ProtectedProductImage from "@/components/protected-product-image";
+import QuickSelectModal, {
+  type QuickSelectAction,
+  type QuickSelectProduct,
+  type QuickSelectVariation,
+} from "@/components/quick-select-modal";
 
 /* ============================================================
    TYPES
@@ -25,15 +30,8 @@ interface GraphQLAttribute {
   options: string[];
 }
 
-interface GraphQLProduct {
-  id: string;
-  databaseId: number;
-  name: string;
-  slug: string;
-  price: string | null;
-  regularPrice: string | null;
+interface GraphQLProduct extends QuickSelectProduct {
   stockStatus?: string | null;
-  image: { sourceUrl: string } | null;
   productCategories: { nodes: GraphQLCategory[] } | null;
   productTags?: { nodes: Array<{ name: string; slug: string }> } | null;
   attributes?: {
@@ -109,6 +107,30 @@ const PRODUCTS_QUERY: string = `
         ... on VariableProduct {
           price
           regularPrice
+          variations(first: 100) {
+            nodes {
+              id
+              databaseId
+              name
+              price
+              regularPrice
+              ... on InventoriedProduct {
+                stockStatus
+              }
+              ... on ProductVariation {
+                purchasable
+              }
+              image {
+                sourceUrl
+              }
+              attributes {
+                nodes {
+                  name
+                  value
+                }
+              }
+            }
+          }
         }
         ... on ProductWithAttributes {
           attributes {
@@ -182,6 +204,10 @@ function getDiscountPercent(price: string | null, regularPrice: string | null): 
   const regular = parseAmount(regularPrice);
   if (current === null || regular === null || regular <= current) return null;
   return Math.round(((regular - current) / regular) * 100);
+}
+
+function hasProductVariations(product: GraphQLProduct): boolean {
+  return (product.variations?.nodes?.length ?? 0) > 0;
 }
 
 function formatAttributeLabel(raw: string): string {
@@ -945,6 +971,9 @@ function ShopContent(): ReactNode {
   const [sheetOpen, setSheetOpen] = useState<boolean>(false);
   const [showScrollTop, setShowScrollTop] = useState<boolean>(false);
 
+  const [quickSelectProduct, setQuickSelectProduct] = useState<GraphQLProduct | null>(null);
+  const [quickSelectAction, setQuickSelectAction] = useState<QuickSelectAction | null>(null);
+
   const [sort, setSort] = useState<SortKey>("default");
   const [page, setPage] = useState<number>(1);
 
@@ -1207,26 +1236,36 @@ function ShopContent(): ReactNode {
     }
   };
 
-  const handleAddToCart = (product: GraphQLProduct): void => {
+  const executeAddWithId = (
+    slug: string,
+    itemId: string,
+    itemName: string,
+    image: string | null,
+    unitPrice: number
+  ): void => {
     addToCart({
-      id: String(product.databaseId),
-      slug: product.slug,
-      name: product.name,
-      image: product.image?.sourceUrl ?? null,
-      price: parseAmount(product.price) ?? 0,
+      id: itemId,
+      slug,
+      name: itemName,
+      image,
+      price: unitPrice,
     });
-    setToast(`Added: ${product.name}`);
+    setToast(`Added: ${itemName}`);
   };
 
-  const handleBuyNow = (product: GraphQLProduct): void => {
-    const price = parseAmount(product.price);
-    if (price === null) return;
+  const executeBuyNowWithId = (
+    slug: string,
+    itemId: string,
+    itemName: string,
+    image: string | null,
+    unitPrice: number
+  ): void => {
     const expressItem: CartItem = {
-      id: String(product.databaseId),
-      slug: product.slug,
-      name: product.name,
-      image: product.image?.sourceUrl ?? null,
-      price,
+      id: itemId,
+      slug,
+      name: itemName,
+      image,
+      price: unitPrice,
       quantity: 1,
     };
     try {
@@ -1241,6 +1280,63 @@ function ShopContent(): ReactNode {
       });
     }
     router.push("/checkout?mode=buy_now");
+  };
+
+  const handleAddToCart = (product: GraphQLProduct): void => {
+    if (hasProductVariations(product)) {
+      setQuickSelectProduct(product);
+      setQuickSelectAction("cart");
+      return;
+    }
+    executeAddWithId(
+      product.slug,
+      String(product.databaseId),
+      product.name,
+      product.image?.sourceUrl ?? null,
+      parseAmount(product.price) ?? 0
+    );
+  };
+
+  const handleBuyNow = (product: GraphQLProduct): void => {
+    if (hasProductVariations(product)) {
+      setQuickSelectProduct(product);
+      setQuickSelectAction("buy_now");
+      return;
+    }
+    const price = parseAmount(product.price);
+    if (price === null) return;
+    executeBuyNowWithId(
+      product.slug,
+      String(product.databaseId),
+      product.name,
+      product.image?.sourceUrl ?? null,
+      price
+    );
+  };
+
+  const handleQuickSelectConfirm = ({
+    product,
+    variation,
+    unitPrice,
+    action,
+  }: {
+    product: QuickSelectProduct;
+    variation: QuickSelectVariation;
+    unitPrice: number;
+    action: QuickSelectAction;
+  }): void => {
+    const variationIdStr = String(variation.databaseId);
+    const fullName = `${product.name} — ${variation.name}`;
+    const imgUrl = variation.image?.sourceUrl || product.image?.sourceUrl || null;
+
+    setQuickSelectProduct(null);
+    setQuickSelectAction(null);
+
+    if (action === "buy_now") {
+      executeBuyNowWithId(product.slug, variationIdStr, fullName, imgUrl, unitPrice);
+    } else {
+      executeAddWithId(product.slug, variationIdStr, fullName, imgUrl, unitPrice);
+    }
   };
 
   const handleToggleWishlist = (product: GraphQLProduct): void => {
@@ -1432,6 +1528,16 @@ function ShopContent(): ReactNode {
           </div>
         </div>
       </section>
+
+      <QuickSelectModal
+        product={quickSelectProduct}
+        action={quickSelectAction}
+        onClose={() => {
+          setQuickSelectProduct(null);
+          setQuickSelectAction(null);
+        }}
+        onConfirm={handleQuickSelectConfirm}
+      />
 
       <MobileFilterSheet
         open={sheetOpen}

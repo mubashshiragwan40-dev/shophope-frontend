@@ -21,7 +21,7 @@ const MAX_LINES: number = 50;
    TYPES
    ============================================================ */
 export interface CartItem {
-  /** WPGraphQL global ID or database ID. Sent to the server as-is. */
+  /** WPGraphQL global ID or database ID (or variation databaseId for variable products). */
   id: string;
   slug: string;
   name: string;
@@ -99,8 +99,8 @@ export function writeCart(items: CartItem[]): void {
    ============================================================ */
 
 /**
- * Adds a product. If it is already in the cart, the quantity is increased.
- * Returns false when nothing was added (invalid product data, or the cart already has 50 different products).
+- Adds a product. If it is already in the cart, the quantity is increased.
+- Returns false when nothing was added (invalid product data, or the cart already has 50 different products).
  */
 export function addToCart(input: CartItemInput, quantity: number = 1): boolean {
   if (!isBrowser()) return false;
